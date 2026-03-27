@@ -1,0 +1,46 @@
+#define PIN_RELE 23
+
+// Duración de limpieza: 3 minutos
+const unsigned long DURACION = 180000;
+
+bool activo = false;
+unsigned long inicio = 0;
+
+void setup() {
+  pinMode(PIN_RELE, OUTPUT);
+  digitalWrite(PIN_RELE, LOW); // apagado
+
+  Serial.begin(115200);
+}
+
+void loop() {
+
+  // Activación manual por serial (envía '1')
+  if (Serial.available()) {
+    char cmd = Serial.read();
+
+    if (cmd == '1' && !activo) {
+      activarTransductor();
+    }
+  }
+
+  // Control de tiempo
+  if (activo && millis() - inicio >= DURACION) {
+    desactivarTransductor();
+  }
+}
+
+void activarTransductor() {
+  digitalWrite(PIN_RELE, HIGH); // ON
+  inicio = millis();
+  activo = true;
+
+  Serial.println("Transductor ON");
+}
+
+void desactivarTransductor() {
+  digitalWrite(PIN_RELE, LOW); // OFF
+  activo = false;
+
+  Serial.println("Transductor OFF");
+}
