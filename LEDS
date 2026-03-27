@@ -1,0 +1,163 @@
+#include <stdio.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "nvs_flash.h"
+#include "nvs.h"
+
+// -------- Pines LED --------
+#define PIN_RED   25
+#define PIN_GREEN 26
+#define PIN_BLUE  27
+
+// -------- Tiempos (microsegundos) --------
+#define TIEMPO_ESPERA   (48LL * 60LL * 60LL * 1000000LL)
+#define TIEMPO_LIMPIEZA (30LL * 1000000LL)      // Ajusta
+#define TIEMPO_VERDE    (5LL * 60LL * 1000000LL)
+
+// -------- Estados --------
+typedef enum {
+    ESPERA = 0,
+    LIMPIANDO,
+    FINALIZADO
+} estado_t;
+
+static const char *TAG = "SISTEMA";
+
+estado_t estado_actual;
+int64_t tiempo_inicio_estado;
+
+// -------- NVS --------
+nvs_handle_t nvs_handle;
+
+// -------- LED --------
+void set_color(int r, int g, int b) {
+    gpio_set_level(PIN_RED, r);
+    gpio_set_level(PIN_GREEN, g);
+    gpio_set_level(PIN_BLUE, b);
+}
+
+// -------- GPIO --------
+void init_gpio() {
+    gpio_reset_pin(PIN_RED);
+    gpio_reset_pin(PIN_GREEN);
+    gpio_reset_pin(PIN_BLUE);
+
+    gpio_set_direction(PIN_RED, GPIO_MODE_OUTPUT);
+    gpio_set_direction(PIN_GREEN, GPIO_MODE_OUTPUT);
+    gpio_set_direction(PIN_BLUE, GPIO_MODE_OUTPUT);
+}
+
+// -------- Guardar estado --------
+void guardar_estado() {
+    nvs_set_i32(nvs_handle, "estado", estado_actual);
+    nvs_set_i64(nvs_handle, "tiempo", tiempo_inicio_estado);
+    nvs_commit(nvs_handle);
+}
+
+// -------- Cargar estado --------
+void cargar_estado() {
+    int32_t estado_guardado = 0;
+    int64_t tiempo_guardado = 0;
+
+    esp_err_t err1 = nvs_get_i32(nvs_handle, "estado", &estado_guardado);
+    esp_err_t err2 = nvs_get_i64(nvs_handle, "tiempo", &tiempo_guardado);
+
+    if (err1 == ESP_OK && err2 == ESP_OK) {
+        estado_actual = (estado_t)estado_guardado;
+        tiempo_inicio_estado = tiempo_guardado;
+        ESP_LOGI(TAG, "Estado recuperado desde NVS");
+    } else {
+        estado_actual = ESPERA;
+        tiempo_inicio_estado = esp_timer_get_time();
+        ESP_LOGI(TAG, "Estado inicial por defecto");
+    }
+}
+
+// -------- Tarea principal --------
+void sistema_task(void *pvParameters) {
+
+    while (1) {
+
+        int64_t ahora = esp_timer_get_time();
+
+        switch (estado_actual) {
+
+            case ESPERA:
+                set_color(1, 1, 0); // Amarillo
+
+                if (ahora - tiempo_inicio_estado >= TIEMPO_ESPERA) {
+                    ESP_LOGI(TAG, "Iniciando limpieza...");
+                    estado_actual = LIMPIANDO;
+                    tiempo_inicio_estado = ahora;
+                    guardar_estado();
+                }
+                break;
+
+            case LIMPIANDO:
+                set_color(1, 0, 0); // Rojo
+
+                // Activar ultrasonido aquí
+                // gpio_set_level(PIN_ULTRA, 1);
+
+                if (ahora - tiempo_inicio_estado >= TIEMPO_LIMPIEZA) {
+                    ESP_LOGI(TAG, "Limpieza finalizada");
+
+                    // gpio_set_level(PIN_ULTRA, 0);
+
+                    estado_actual = FINALIZADO;
+                    tiempo_inicio_estado = ahora;
+                    guardar_estado();
+                }
+                break;
+
+            case FINALIZADO:
+                set_color(0, 1, 0); // Verde
+
+                if (ahora - tiempo_inicio_estado >= TIEMPO_VERDE) {
+                    ESP_LOGI(TAG, "Volviendo a espera");
+
+                    estado_actual = ESPERA;
+                    tiempo_inicio_estado = ahora;
+                    guardar_estado();
+                }
+                break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+}
+
+// -------- MAIN --------
+void app_main(void) {
+
+    // Inicializar NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
+
+    nvs_open("storage", NVS_READWRITE, &nvs_handle);
+
+    // GPIO
+    init_gpio();
+
+    // Cargar estado previo
+    cargar_estado();
+
+    ESP_LOGI(TAG, "Sistema iniciado");
+
+    // Crear tarea
+    xTaskCreate(
+        sistema_task,
+        "sistema_task",
+        4096,
+        NULL,
+        5,
+        NULL
+    );
+}
