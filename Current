@@ -1,0 +1,109 @@
+#include <stdio.h>
+#include <math.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/adc.h"
+
+//////////////////////////////
+// CONFIGURACIÓN
+//////////////////////////////
+
+#define ADC_CHANNEL ADC1_CHANNEL_6   // GPIO34
+#define ADC_ATTEN ADC_ATTEN_DB_11
+#define ADC_WIDTH ADC_WIDTH_BIT_12
+
+#define SAMPLE_RATE_HZ 1000
+#define WINDOW_SIZE 200
+
+#define SENSOR_SENSITIVITY 0.066f   // 66 mV/A (30A)
+#define VREF 3.3f
+
+//////////////////////////////
+//  VARIABLES INTERNAS
+//////////////////////////////
+
+static float offset = 0.0f;
+static float samples[WINDOW_SIZE];
+static int index_sample = 0;
+
+//////////////////////////////
+//  FUNCIONES DEL SENSOR
+//////////////////////////////
+
+void current_sensor_init(void)
+{
+    adc1_config_width(ADC_WIDTH);
+    adc1_config_channel_atten(ADC_CHANNEL, ADC_ATTEN);
+
+    // Calibración de offset
+    float sum = 0;
+    for (int i = 0; i < 500; i++) {
+        int raw = adc1_get_raw(ADC_CHANNEL);
+        float voltage = (raw / 4095.0f) * VREF;
+        sum += voltage;
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    offset = sum / 500.0f;
+}
+
+float current_sensor_read_instant(void)
+{
+    int raw = adc1_get_raw(ADC_CHANNEL);
+    float voltage = (raw / 4095.0f) * VREF;
+
+    float current = (voltage - offset) / SENSOR_SENSITIVITY;
+
+    return current;
+}
+
+void current_sensor_add_sample(float sample)
+{
+    samples[index_sample++] = sample;
+
+    if (index_sample >= WINDOW_SIZE) {
+        index_sample = 0;
+    }
+}
+
+float current_sensor_calculate_rms(void)
+{
+    float sum_sq = 0;
+
+    for (int i = 0; i < WINDOW_SIZE; i++) {
+        sum_sq += samples[i] * samples[i];
+    }
+
+    return sqrt(sum_sq / WINDOW_SIZE);
+}
+
+//////////////////////////////
+// MAIN (PRUEBA)
+//////////////////////////////
+
+void app_main(void)
+{
+    printf("Inicializando sensor de corriente...\n");
+
+    current_sensor_init();
+
+    printf("Offset calibrado correctamente\n");
+
+    while (1)
+    {
+        float current = current_sensor_read_instant();
+
+        //  Agregar muestra
+        current_sensor_add_sample(current);
+
+        float rms = current_sensor_calculate_rms();
+
+        printf("Instant: %.2f A | RMS: %.2f A\n", current, rms);
+
+        //  Ejemplo de detección de falla
+        if (rms > 10.0) {
+            printf(" ALERTA: Sobrecorriente detectada\n");
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
