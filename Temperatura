@@ -1,0 +1,102 @@
+#include <WiFi.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <MySQL_Connection.h>
+#include <MySQL_Cursor.h>
+
+// WiFi
+const char* ssid = "TU_SSID";
+const char* password = "TU_PASS";
+
+// MySQL
+IPAddress db_addr(192,168,1,100); // IP del servidor MySQL
+uint16_t db_port = 3306;
+char db_user[] = "db_user";
+char db_pass[] = "db_pass";
+char db_name[] = "nombre_db";
+MySQL_Connection conn((Client *) &WiFi); // constructor para ESP32
+MySQL_Cursor* cursor;
+
+// DS18B20
+const int ONE_WIRE_PIN = 18;
+OneWire oneWire(ONE_WIRE_PIN);
+DallasTemperature sensors(&oneWire);
+
+// Intervalo
+const unsigned long INTERVAL_MS = 600000UL; // 10 minutos
+unsigned long lastMillis = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+
+  sensors.begin();
+
+  WiFi.begin(ssid, password);
+  Serial.print("Conectando WiFi");
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
+    delay(500); Serial.print(".");
+  }
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("WiFi OK: " + String(WiFi.localIP().toString()));
+  } else {
+    Serial.println("WiFi fallo");
+  }
+
+  // Intentar conectar a MySQL
+  Serial.println("Conectando MySQL...");
+  if (conn.connect(db_addr, db_port, db_user, db_pass, db_name)) {
+    Serial.println("MySQL conectado");
+    cursor = new MySQL_Cursor(&conn);
+  } else {
+    Serial.println("Fallo conexión MySQL");
+  }
+
+  lastMillis = millis() - INTERVAL_MS; // forzar primer envío inmediato
+}
+
+float readTempC() {
+  sensors.requestTemperatures();
+  float t = sensors.getTempCByIndex(0);
+  return t;
+}
+
+void insertTemperature(float temp) {
+  if (!conn.connected()) {
+    Serial.println("No conectado a DB, intentando reconectar...");
+    if (!conn.connect(db_addr, db_port, db_user, db_pass, db_name)) {
+      Serial.println("Reintento fallido");
+      return;
+    }
+    cursor = new MySQL_Cursor(&conn);
+  }
+
+  // Ajusta tabla y columnas: tabla 'temperaturas' con columnas (id AUTO, sensor VARCHAR, temp FLOAT, ts TIMESTAMP DEFAULT NOW())
+  char query[200];
+  snprintf(query, sizeof(query),
+           "INSERT INTO temperaturas (sensor, temp_c) VALUES ('ds18b20_1', %.2f);",
+           temp);
+
+  Serial.println("Ejecutando query: ");
+  Serial.println(query);
+
+  cursor->execute(query);
+}
+
+void loop() {
+  unsigned long now = millis();
+  if (now - lastMillis >= INTERVAL_MS) {
+    lastMillis = now;
+
+    float temp = readTempC();
+    if (temp == DEVICE_DISCONNECTED_C) {
+      Serial.println("Sensor desconectado");
+    } else {
+      Serial.printf("Temp: %.2f C\n", temp);
+      insertTemperature(temp);
+    }
+  }
+  delay(100);
+}
