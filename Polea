@@ -1,0 +1,68 @@
+#define STEP_PIN 18
+#define DIR_PIN 19
+#define ENABLE_PIN 5
+#define BUTTON_PIN 4
+
+unsigned long tiempoAnterior = 0;
+const unsigned long intervalo = 172800000; // 48 horas en ms
+
+bool enProceso = false;
+
+void setup() {
+  pinMode(STEP_PIN, OUTPUT);
+  pinMode(DIR_PIN, OUTPUT);
+  pinMode(ENABLE_PIN, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  digitalWrite(ENABLE_PIN, LOW); // activar driver
+}
+
+void loop() {
+  unsigned long tiempoActual = millis();
+
+  // Activación automática cada 48h
+  if ((tiempoActual - tiempoAnterior >= intervalo) && !enProceso) {
+    tiempoAnterior = tiempoActual;
+    cicloLimpieza();
+  }
+
+  // Activación manual (botón)
+  if (digitalRead(BUTTON_PIN) == LOW && !enProceso) {
+    delay(200); // debounce básico
+    cicloLimpieza();
+  }
+}
+
+void cicloLimpieza() {
+  enProceso = true;
+
+  bajarSensor();
+  
+  delay(240000); // 4 minutos (puedes ajustar entre 3-5)
+
+  subirSensor();
+
+  enProceso = false;
+}
+
+void bajarSensor() {
+  digitalWrite(DIR_PIN, HIGH);
+
+  for (int i = 0; i < 2000; i++) { // ajustar pasos según distancia
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(800);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(800);
+  }
+}
+
+void subirSensor() {
+  digitalWrite(DIR_PIN, LOW);
+
+  for (int i = 0; i < 2000; i++) {
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(800);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(800);
+  }
+}
