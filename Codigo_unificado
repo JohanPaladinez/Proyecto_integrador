@@ -2,80 +2,52 @@
 #include <math.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include <MySQL_Connection.h>
-#include <MySQL_Cursor.h>
-
-// =========================
-// CONFIGURACION GENERAL
-// =========================
-const char* ssid = "TU_SSID";
-const char* password = "TU_PASS";
-
-IPAddress db_addr(192, 168, 1, 100);
-uint16_t db_port = 3306;
-char db_user[] = "db_user";
-char db_pass[] = "db_pass";
-char db_name[] = "nombre_db";
 
 // -------------------------
 // Pines
 // -------------------------
-// Se mueve el DS18B20 a GPIO21 para evitar conflicto con STEP_PIN=18.
 static const uint8_t DS18B20_PIN = 21;
 
-static const uint8_t RELAY1_PIN = 23;
-static const uint8_t RELAY2_PIN = 22;
-static const bool RELAY_ACTIVE_HIGH = true;   // cambia a false si tu modulo rele es activo en LOW
+static const uint8_t RELAY1_PIN = 32;
+static const uint8_t RELAY2_PIN = 33;
+static const bool RELAY_ACTIVE_HIGH = true;
 
-static const uint8_t STEP_PIN = 18;
-static const uint8_t DIR_PIN = 19;
-static const uint8_t ENABLE_PIN = 5;
 static const uint8_t BUTTON_PIN = 4;
 
 static const uint8_t LED_R_PIN = 25;
-static const uint8_t LED_G_PIN = 26;
-static const uint8_t LED_B_PIN = 27;
+static const uint8_t LED_G_PIN = 27;
+static const uint8_t LED_B_PIN = 26;
 
 static const uint8_t CURRENT_PIN = 34;
 
 // -------------------------
 // Tiempos
 // -------------------------
-static const unsigned long INTERVALO_CICLO_MS = 172800000UL;  // 48 h
-static const unsigned long DURACION_LIMPIEZA_MS = 240000UL;   // 4 min
-static const unsigned long TIEMPO_FINAL_MS = 300000UL;        // 5 min en verde
-static const unsigned long INTERVALO_TEMP_MS = 600000UL;      // 10 min
+static const unsigned long TIEMPO_ESPERA_MS   = 15000UL;    // 15 s
+static const unsigned long TIEMPO_LIMPIEZA_MS = 120000UL;   // 2 min
+static const unsigned long TIEMPO_FINAL_MS    = 5000UL;     // 5 s
+
+static const unsigned long INTERVALO_TEMP_MS = 600000UL;
 static const unsigned long DEBOUNCE_MS = 200UL;
 
 // -------------------------
-// Motor / polea
+// Corriente
 // -------------------------
-static const int PASOS_BAJAR = 2000;
-static const int PASOS_SUBIR = 2000;
-static const int STEP_DELAY_US = 800;
-
-// -------------------------
-// Sensor de corriente
-// -------------------------
-static const float SENSOR_SENSITIVITY = 0.066f;  // 66 mV/A
+static const float SENSOR_SENSITIVITY = 0.066f;
 static const float VREF = 3.3f;
 static const int ADC_MAX_VALUE = 4095;
 static const int WINDOW_SIZE = 200;
 static const float LIMITE_SOBRECORRIENTE_RMS = 10.0f;
 
-// =========================
-// OBJETOS
-// =========================
-WiFiClient wifiClient;
-MySQL_Connection conn((Client*)&wifiClient);
-MySQL_Cursor* cursor = nullptr;
-
+// -------------------------
+// Objetos
+// -------------------------
 OneWire oneWire(DS18B20_PIN);
 DallasTemperature sensors(&oneWire);
 
-// =========================
-// ESTADOS DEL SISTEMA
-// =========================
+// -------------------------
+// Estados
+// -------------------------
 enum EstadoSistema {
   ESPERA = 0,
   LIMPIANDO,
@@ -85,450 +57,166 @@ enum EstadoSistema {
 
 EstadoSistema estadoActual = ESPERA;
 
-// =========================
-// VARIABLES GLOBALES
-// =========================
-unsigned long tUltimoCiclo = 0;
+// -------------------------
 unsigned long tInicioEstado = 0;
-unsigned long tUltimaTemp = 0;
 unsigned long tUltimoBoton = 0;
-
-bool relay1Manual = false;
-bool relay2Manual = false;
-bool usarRelay1EnCiclo = true;
-bool usarRelay2EnCiclo = true;
-bool sensorAbajo = false;
+unsigned long tUltimaTemp = 0;
 
 float currentOffset = 0.0f;
 float samples[WINDOW_SIZE] = {0};
 int sampleIndex = 0;
 float currentRMS = 0.0f;
 
-// =========================
-// UTILIDADES
-// =========================
+// -------------------------
+// Utilidades
+// -------------------------
 void setRGB(bool r, bool g, bool b) {
-  digitalWrite(LED_R_PIN, r ? HIGH : LOW);
-  digitalWrite(LED_G_PIN, g ? HIGH : LOW);
-  digitalWrite(LED_B_PIN, b ? HIGH : LOW);
+  digitalWrite(LED_R_PIN, r);
+  digitalWrite(LED_G_PIN, g);
+  digitalWrite(LED_B_PIN, b);
 }
 
-void actualizarLED() {
-  switch (estadoActual) {
-    case ESPERA:
-      setRGB(true, true, false);   // amarillo
-      break;
-    case LIMPIANDO:
-      setRGB(true, false, false);  // rojo
-      break;
-    case FINALIZADO:
-      setRGB(false, true, false);  // verde
-      break;
-    case FALLO:
-      setRGB(true, false, true);   // magenta
-      break;
-  }
+void setRelay(bool on) {
+  digitalWrite(RELAY1_PIN, on ? LOW : HIGH);
+  digitalWrite(RELAY2_PIN, on ? LOW : HIGH);
 }
 
-void setRelayPin(uint8_t pin, bool on) {
-  digitalWrite(pin, on ? (RELAY_ACTIVE_HIGH ? HIGH : LOW)
-                       : (RELAY_ACTIVE_HIGH ? LOW : HIGH));
-}
-
-void aplicarEstadoReles() {
-  bool r1 = relay1Manual || (estadoActual == LIMPIANDO && usarRelay1EnCiclo);
-  bool r2 = relay2Manual || (estadoActual == LIMPIANDO && usarRelay2EnCiclo);
-
-  setRelayPin(RELAY1_PIN, r1);
-  setRelayPin(RELAY2_PIN, r2);
-}
-
-void apagarTodoUltrasonido() {
-  relay1Manual = false;
-  relay2Manual = false;
-  setRelayPin(RELAY1_PIN, false);
-  setRelayPin(RELAY2_PIN, false);
-}
-
-void stepMotor(int steps, bool dir) {
-  digitalWrite(ENABLE_PIN, LOW);          // habilitar driver
-  digitalWrite(DIR_PIN, dir ? HIGH : LOW);
-
-  for (int i = 0; i < steps; i++) {
-    digitalWrite(STEP_PIN, HIGH);
-    delayMicroseconds(STEP_DELAY_US);
-    digitalWrite(STEP_PIN, LOW);
-    delayMicroseconds(STEP_DELAY_US);
-  }
-}
-
-void bajarSensor() {
-  if (!sensorAbajo) {
-    Serial.println("Bajando sensor...");
-    stepMotor(PASOS_BAJAR, true);
-    sensorAbajo = true;
-  }
-}
-
-void subirSensor() {
-  if (sensorAbajo) {
-    Serial.println("Subiendo sensor...");
-    stepMotor(PASOS_SUBIR, false);
-    sensorAbajo = false;
-  }
-}
-
-// =========================
-// WIFI / MYSQL
-// =========================
-void conectarWiFi() {
-  if (WiFi.status() == WL_CONNECTED) return;
-
-  WiFi.begin(ssid, password);
-  Serial.print("Conectando WiFi");
-
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000UL) {
-    delay(500);
-    Serial.print('.');
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("WiFi OK: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("WiFi fallo");
-  }
-}
-
-bool conectarMySQL() {
-  if (WiFi.status() != WL_CONNECTED) conectarWiFi();
-  if (WiFi.status() != WL_CONNECTED) return false;
-
-  if (conn.connected()) return true;
-
-  Serial.println("Conectando MySQL...");
-  bool ok = conn.connect(db_addr, db_port, db_user, db_pass, db_name);
-
-  if (ok) {
-    Serial.println("MySQL conectado");
-    if (cursor != nullptr) {
-      delete cursor;
-      cursor = nullptr;
-    }
-    cursor = new MySQL_Cursor(&conn);
-  } else {
-    Serial.println("Fallo conexion MySQL");
-  }
-  return ok;
-}
-
-float leerTemperaturaC() {
-  sensors.requestTemperatures();
-  return sensors.getTempCByIndex(0);
-}
-
-void insertarTemperatura(float temp, float rms) {
-  if (!conectarMySQL() || cursor == nullptr) return;
-
-  char query[256];
-  snprintf(query, sizeof(query),
-           "INSERT INTO temperaturas (sensor, temp_c, current_rms) VALUES ('ds18b20_1', %.2f, %.2f);",
-           temp, rms);
-
-  Serial.println("Ejecutando query:");
-  Serial.println(query);
-  cursor->execute(query);
-}
-
-// =========================
-// SENSOR DE CORRIENTE
-// =========================
+// -------------------------
+// Corriente
+// -------------------------
 void initCurrentSensor() {
   analogReadResolution(12);
   analogSetPinAttenuation(CURRENT_PIN, ADC_11db);
 
-  float sum = 0.0f;
+  float sum = 0;
   for (int i = 0; i < 500; i++) {
-    int raw = analogRead(CURRENT_PIN);
-    float voltage = (raw / (float)ADC_MAX_VALUE) * VREF;
-    sum += voltage;
+    float v = (analogRead(CURRENT_PIN) / (float)ADC_MAX_VALUE) * VREF;
+    sum += v;
     delay(2);
   }
   currentOffset = sum / 500.0f;
-  Serial.print("Offset corriente: ");
-  Serial.println(currentOffset, 4);
 }
 
-float readCurrentInstant() {
-  int raw = analogRead(CURRENT_PIN);
-  float voltage = (raw / (float)ADC_MAX_VALUE) * VREF;
-  return (voltage - currentOffset) / SENSOR_SENSITIVITY;
-}
-
-void addCurrentSample(float sample) {
-  samples[sampleIndex++] = sample;
-  if (sampleIndex >= WINDOW_SIZE) sampleIndex = 0;
-}
-
-float calculateCurrentRMS() {
-  float sumSq = 0.0f;
-  for (int i = 0; i < WINDOW_SIZE; i++) {
-    sumSq += samples[i] * samples[i];
-  }
-  return sqrt(sumSq / WINDOW_SIZE);
-}
-
-// =========================
-// CICLO PRINCIPAL
-// =========================
-void iniciarCiclo() {
-  if (estadoActual == LIMPIANDO) return;
-  if (estadoActual == FALLO) {
-    Serial.println("No se puede iniciar: sistema en FALLO");
-    return;
-  }
-
-  Serial.println("=== INICIO DE CICLO ===");
-  bajarSensor();
-  estadoActual = LIMPIANDO;
-  tInicioEstado = millis();
-  tUltimoCiclo = millis();
-  aplicarEstadoReles();
-  actualizarLED();
-}
-
-void finalizarCiclo() {
-  Serial.println("=== FIN DE LIMPIEZA ===");
-  apagarTodoUltrasonido();
-  subirSensor();
-  estadoActual = FINALIZADO;
-  tInicioEstado = millis();
-  actualizarLED();
-}
-
-void entrarEnFallo(const char* motivo) {
-  Serial.print("FALLO: ");
-  Serial.println(motivo);
-  apagarTodoUltrasonido();
-  subirSensor();
-  estadoActual = FALLO;
-  tInicioEstado = millis();
-  actualizarLED();
-}
-
-void limpiarFallo() {
-  if (estadoActual == FALLO) {
-    Serial.println("Saliendo de FALLO -> ESPERA");
-    estadoActual = ESPERA;
-    tInicioEstado = millis();
-    actualizarLED();
-  }
-}
-
-void gestionarCiclo() {
-  unsigned long now = millis();
-
-  if (estadoActual == ESPERA) {
-    if (now - tUltimoCiclo >= INTERVALO_CICLO_MS) {
-      iniciarCiclo();
-    }
-  }
-
-  if (estadoActual == LIMPIANDO) {
-    if (now - tInicioEstado >= DURACION_LIMPIEZA_MS) {
-      finalizarCiclo();
-    }
-  }
-
-  if (estadoActual == FINALIZADO) {
-    if (now - tInicioEstado >= TIEMPO_FINAL_MS) {
-      estadoActual = ESPERA;
-      tInicioEstado = millis();
-      actualizarLED();
-    }
-  }
-}
-
-void gestionarBoton() {
-  if (digitalRead(BUTTON_PIN) == LOW) {
-    unsigned long now = millis();
-    if (now - tUltimoBoton >= DEBOUNCE_MS) {
-      tUltimoBoton = now;
-      if (estadoActual == ESPERA || estadoActual == FINALIZADO) {
-        iniciarCiclo();
-      }
-    }
-  }
-}
-
-void gestionarTemperatura() {
-  unsigned long now = millis();
-  if (now - tUltimaTemp < INTERVALO_TEMP_MS) return;
-  tUltimaTemp = now;
-
-  float temp = leerTemperaturaC();
-  if (temp == DEVICE_DISCONNECTED_C) {
-    Serial.println("Sensor DS18B20 desconectado");
-    return;
-  }
-
-  Serial.print("Temperatura: ");
-  Serial.print(temp, 2);
-  Serial.println(" C");
-
-  insertarTemperatura(temp, currentRMS);
+float readCurrent() {
+  float v = (analogRead(CURRENT_PIN) / (float)ADC_MAX_VALUE) * VREF;
+  return (v - currentOffset) / SENSOR_SENSITIVITY;
 }
 
 void gestionarCorriente() {
-  float instant = readCurrentInstant();
-  addCurrentSample(instant);
-  currentRMS = calculateCurrentRMS();
+  samples[sampleIndex++] = readCurrent();
+  if (sampleIndex >= WINDOW_SIZE) sampleIndex = 0;
 
-  static unsigned long tPrint = 0;
-  if (millis() - tPrint >= 1000UL) {
-    tPrint = millis();
-    Serial.print("Corriente instantanea: ");
-    Serial.print(instant, 2);
-    Serial.print(" A | RMS: ");
-    Serial.print(currentRMS, 2);
-    Serial.println(" A");
-  }
+  static unsigned long t = 0;
+  if (millis() - t > 200) {
+    t = millis();
 
-  bool algunReleActivo = relay1Manual || relay2Manual || estadoActual == LIMPIANDO;
-  if (algunReleActivo && currentRMS > LIMITE_SOBRECORRIENTE_RMS) {
-    entrarEnFallo("Sobrecorriente detectada");
+    float sum = 0;
+    for (int i = 0; i < WINDOW_SIZE; i++) sum += samples[i]*samples[i];
+    currentRMS = sqrt(sum / WINDOW_SIZE);
+
+    Serial.print("Corriente RMS: ");
+    Serial.println(currentRMS);
+
+    if (estadoActual == LIMPIANDO && currentRMS > LIMITE_SOBRECORRIENTE_RMS) {
+      Serial.println("FALLO: Sobrecorriente");
+      estadoActual = FALLO;
+    }
   }
 }
 
-// =========================
-// SERIAL
-// =========================
-void imprimirAyuda() {
-  Serial.println("Comandos disponibles:");
-  Serial.println("  START   -> inicia ciclo completo");
-  Serial.println("  STOP    -> detiene ultrasonido y sube sensor");
-  Serial.println("  RESET   -> sale de estado FALLO");
-  Serial.println("  R1ON    -> enciende rele 1");
-  Serial.println("  R1OFF   -> apaga rele 1");
-  Serial.println("  R2ON    -> enciende rele 2");
-  Serial.println("  R2OFF   -> apaga rele 2");
-  Serial.println("  BOTHON  -> enciende ambos reles manualmente");
-  Serial.println("  BOTHOFF -> apaga ambos reles manualmente");
-  Serial.println("  STATUS  -> muestra estado");
-  Serial.println("  1       -> compatibilidad: inicia ciclo");
+// -------------------------
+// Botón (flanco)
+// -------------------------
+void gestionarBoton() {
+  static bool last = HIGH;
+  bool now = digitalRead(BUTTON_PIN);
+
+  if (last == HIGH && now == LOW) {
+    if (millis() - tUltimoBoton > DEBOUNCE_MS) {
+      tUltimoBoton = millis();
+
+      Serial.println("=== REINICIO MANUAL ===");
+
+      estadoActual = LIMPIANDO;
+      tInicioEstado = millis();
+    }
+  }
+  last = now;
 }
 
-void imprimirEstado() {
-  Serial.println("----- ESTADO DEL SISTEMA -----");
-  Serial.print("Estado: ");
+// -------------------------
+// Ciclo principal
+// -------------------------
+void gestionarCiclo() {
+  unsigned long now = millis();
+
   switch (estadoActual) {
-    case ESPERA: Serial.println("ESPERA"); break;
-    case LIMPIANDO: Serial.println("LIMPIANDO"); break;
-    case FINALIZADO: Serial.println("FINALIZADO"); break;
-    case FALLO: Serial.println("FALLO"); break;
-  }
-  Serial.print("Sensor abajo: "); Serial.println(sensorAbajo ? "SI" : "NO");
-  Serial.print("Relay1 manual: "); Serial.println(relay1Manual ? "ON" : "OFF");
-  Serial.print("Relay2 manual: "); Serial.println(relay2Manual ? "ON" : "OFF");
-  Serial.print("Corriente RMS: "); Serial.print(currentRMS, 2); Serial.println(" A");
-  Serial.println("------------------------------");
-}
 
-void gestionarSerial() {
-  if (!Serial.available()) return;
+    case ESPERA:
+      setRGB(1, 0, 0); // 🔴 Rojo
+      setRelay(false);
 
-  String cmd = Serial.readStringUntil('\n');
-  cmd.trim();
-  cmd.toUpperCase();
+      if (now - tInicioEstado >= TIEMPO_ESPERA_MS) {
+        Serial.println("→ LIMPIANDO");
+        estadoActual = LIMPIANDO;
+        tInicioEstado = now;
+      }
+      break;
 
-  if (cmd.length() == 0) return;
+    case LIMPIANDO:
+      setRGB(0, 0, 1); // 🔵 Azul
+      setRelay(true);
 
-  if (cmd == "1" || cmd == "START") {
-    iniciarCiclo();
-  } else if (cmd == "STOP") {
-    apagarTodoUltrasonido();
-    subirSensor();
-    estadoActual = ESPERA;
-    tInicioEstado = millis();
-  } else if (cmd == "RESET") {
-    limpiarFallo();
-  } else if (cmd == "R1ON") {
-    relay1Manual = true;
-    aplicarEstadoReles();
-  } else if (cmd == "R1OFF") {
-    relay1Manual = false;
-    aplicarEstadoReles();
-  } else if (cmd == "R2ON") {
-    relay2Manual = true;
-    aplicarEstadoReles();
-  } else if (cmd == "R2OFF") {
-    relay2Manual = false;
-    aplicarEstadoReles();
-  } else if (cmd == "BOTHON") {
-    relay1Manual = true;
-    relay2Manual = true;
-    aplicarEstadoReles();
-  } else if (cmd == "BOTHOFF") {
-    relay1Manual = false;
-    relay2Manual = false;
-    aplicarEstadoReles();
-  } else if (cmd == "STATUS") {
-    imprimirEstado();
-  } else if (cmd == "HELP") {
-    imprimirAyuda();
-  } else {
-    Serial.print("Comando no reconocido: ");
-    Serial.println(cmd);
-    imprimirAyuda();
+      if (now - tInicioEstado >= TIEMPO_LIMPIEZA_MS) {
+        Serial.println("→ FINALIZADO");
+        estadoActual = FINALIZADO;
+        tInicioEstado = now;
+      }
+      break;
+
+    case FINALIZADO:
+      setRGB(0, 1, 0); // 🟢 Verde
+      setRelay(false);
+
+      if (now - tInicioEstado >= TIEMPO_FINAL_MS) {
+        Serial.println("→ ESPERA");
+        estadoActual = ESPERA;
+        tInicioEstado = now;
+      }
+      break;
+
+    case FALLO:
+      setRGB(1, 0, 1); // 🟣 Morado
+      setRelay(false);
+      break;
   }
 }
 
-// =========================
-// SETUP / LOOP
-// =========================
+// -------------------------
+// Setup / Loop
+// -------------------------
 void setup() {
   Serial.begin(115200);
-  delay(300);
 
   pinMode(RELAY1_PIN, OUTPUT);
   pinMode(RELAY2_PIN, OUTPUT);
-  pinMode(STEP_PIN, OUTPUT);
-  pinMode(DIR_PIN, OUTPUT);
-  pinMode(ENABLE_PIN, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   pinMode(LED_R_PIN, OUTPUT);
   pinMode(LED_G_PIN, OUTPUT);
   pinMode(LED_B_PIN, OUTPUT);
 
-  digitalWrite(ENABLE_PIN, LOW);
-  setRelayPin(RELAY1_PIN, false);
-  setRelayPin(RELAY2_PIN, false);
-
   sensors.begin();
   initCurrentSensor();
-  conectarWiFi();
-  conectarMySQL();
 
   estadoActual = ESPERA;
   tInicioEstado = millis();
-  tUltimoCiclo = millis();
-  tUltimaTemp = millis() - INTERVALO_TEMP_MS;  // fuerza primer registro
-
-  actualizarLED();
-  imprimirAyuda();
-  Serial.println("Sistema unificado iniciado");
 }
 
 void loop() {
-  gestionarSerial();
   gestionarBoton();
   gestionarCorriente();
-  gestionarTemperatura();
   gestionarCiclo();
-  actualizarLED();
 
-  delay(10);
+  delay(20);
 }
