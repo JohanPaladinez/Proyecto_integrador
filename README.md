@@ -24,8 +24,8 @@ Desarrollar un prototipo funcional basado en ESP32 que permita automatizar tarea
 
 ```bash
 Proyecto_integrador/
+│── Codigo_unificado
 │── LEDS
-│── Polea
 │── RELE
 │── Temperatura
 └── README.md
