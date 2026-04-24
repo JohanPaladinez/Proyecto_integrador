@@ -1,0 +1,620 @@
+<?php
+$host = 'localhost';
+$db   = 'sistema_limpieza';
+$user = 'root';
+$pass = '';
+$charset = 'utf8mb4';
+
+$dsn = "mysql:host=$host;dbname=$db;charset=$charset";
+$options = [
+    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    PDO::ATTR_EMULATE_PREPARES => false,
+];
+
+try {
+    $pdo = new PDO($dsn, $user, $pass, $options);
+} catch (Exception $e) {
+    die('Error de conexión a la base de datos: ' . $e->getMessage());
+}
+
+// Acción: registrar limpieza manual
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['iniciar_limpieza'])) {
+    $stmt = $pdo->prepare("INSERT INTO limpieza (fecha_hora) VALUES (NOW())");
+    $stmt->execute();
+    header('Location: ' . $_SERVER['PHP_SELF'] . '?ok=1');
+    exit;
+}
+
+// Consultas principales
+$ultimoDato = $pdo->query("SELECT * FROM datos ORDER BY fecha_hora DESC LIMIT 1")->fetch();
+$ultimoModo = $pdo->query("SELECT * FROM modo ORDER BY fecha_hora DESC LIMIT 1")->fetch();
+$ultimaAlerta = $pdo->query("SELECT * FROM alertas ORDER BY fecha_hora DESC LIMIT 1")->fetch();
+$ultimaLimpieza = $pdo->query("SELECT * FROM limpieza ORDER BY fecha_hora DESC LIMIT 1")->fetch();
+$historial = $pdo->query("SELECT * FROM datos ORDER BY fecha_hora DESC LIMIT 10")->fetchAll();
+$totalAlertas = $pdo->query("SELECT COUNT(*) AS total FROM alertas")->fetch();
+
+$temperaturaActual = $ultimoDato['temperatura'] ?? null;
+$modoActual = $ultimoModo['tipo_modo'] ?? 'Sin datos';
+$fechaModo = $ultimoModo['fecha_hora'] ?? null;
+$fechaLimpieza = $ultimaLimpieza['fecha_hora'] ?? null;
+$alertaActual = $ultimaAlerta['descripcion'] ?? 'Sin alertas registradas';
+$fechaAlerta = $ultimaAlerta['fecha_hora'] ?? null;
+
+$estadoSistema = 'ESPERA';
+$estadoClase = 'espera';
+$mensajeLectura = 'Lecturas válidas';
+$mensajeResultado = 'Sistema estable';
+
+if ($ultimaAlerta) {
+    $estadoSistema = 'ALERTA';
+    $estadoClase = 'alerta';
+    $mensajeLectura = 'Revisar dispositivo';
+    $mensajeResultado = 'Falla detectada';
+} elseif ($temperaturaActual !== null) {
+    $estadoSistema = 'OPERANDO';
+    $estadoClase = 'operando';
+}
+
+function formatearFecha($fecha) {
+    if (!$fecha) return 'Sin registro';
+    return date('d/m/Y H:i', strtotime($fecha));
+}
+?>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema de limpieza ultrasónica del reactor</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background: #091120;
+            color: #e8eefc;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: radial-gradient(circle at top left, #16294f, #0b1429 55%, #08101e);
+            border: 1px solid rgba(84, 109, 168, 0.25);
+            border-radius: 28px;
+            box-shadow: 0 18px 45px rgba(0, 0, 0, 0.45);
+            overflow: hidden;
+        }
+
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 22px 28px;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .brand-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 14px;
+            background: linear-gradient(135deg, #0f6079, #13243d);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #81f0ff;
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .brand small {
+            display: block;
+            color: #84a4d9;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            font-size: 11px;
+            margin-bottom: 2px;
+        }
+
+        .brand h1 {
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .nav {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .nav a {
+            text-decoration: none;
+            color: #e8eefc;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.08);
+            padding: 10px 18px;
+            border-radius: 18px;
+            font-size: 14px;
+        }
+
+        .nav a.active {
+            border-color: #58def4;
+            box-shadow: inset 0 0 0 1px #58def4;
+        }
+
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1.45fr 1fr;
+            gap: 22px;
+            padding: 24px;
+        }
+
+        .left-col, .right-col {
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+        }
+
+        .section-title {
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+            margin-bottom: 4px;
+        }
+
+        .section-icon {
+            width: 38px;
+            height: 38px;
+            border-radius: 14px;
+            background: rgba(41, 189, 224, 0.12);
+            border: 1px solid rgba(88, 222, 244, 0.18);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #79e9ff;
+            flex-shrink: 0;
+        }
+
+        .section-title h2 {
+            font-size: 18px;
+            margin-bottom: 4px;
+        }
+
+        .section-title p {
+            color: #a0b2d8;
+            font-size: 13px;
+        }
+
+        .panel,
+        .status-banner,
+        .summary-card,
+        .info-card,
+        .history-table {
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 24px;
+            box-shadow: 0 14px 30px rgba(0,0,0,0.18);
+        }
+
+        .status-banner {
+            padding: 18px 22px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 96px;
+        }
+
+        .status-banner small {
+            display: block;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+            font-size: 11px;
+            opacity: 0.8;
+        }
+
+        .status-banner strong {
+            font-size: 36px;
+            line-height: 1;
+        }
+
+        .status-dot {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            box-shadow: 0 0 18px currentColor;
+        }
+
+        .espera {
+            background: linear-gradient(90deg, #f0c93a, #d3ca72);
+            color: #202020;
+        }
+
+        .espera .status-dot { color: #ffd24a; background: #ffd24a; }
+
+        .operando {
+            background: linear-gradient(90deg, #32d1e6, #7ef6c8);
+            color: #07222a;
+        }
+
+        .operando .status-dot { color: #20f4ff; background: #20f4ff; }
+
+        .alerta {
+            background: linear-gradient(90deg, #ff6874, #ffb36c);
+            color: #2a0f0f;
+        }
+
+        .alerta .status-dot { color: #ff4b57; background: #ff4b57; }
+
+        .panel {
+            padding: 20px 22px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .panel h3 {
+            font-size: 14px;
+            color: #c0cdea;
+            margin-bottom: 6px;
+            font-weight: 500;
+        }
+
+        .panel p {
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #4ee1f2, #7ad5ff);
+            color: #053041;
+            border: none;
+            padding: 14px 22px;
+            border-radius: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            box-shadow: 0 10px 24px rgba(78, 225, 242, 0.25);
+        }
+
+        .btn:hover {
+            filter: brightness(1.05);
+        }
+
+        .mini-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+        }
+
+        .info-card {
+            padding: 20px;
+        }
+
+        .info-card h4 {
+            color: #bccaea;
+            font-size: 14px;
+            margin-bottom: 14px;
+            font-weight: 500;
+        }
+
+        .leds {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .led {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .led.yellow { background: #ffd64d; box-shadow: 0 0 12px #ffd64d; }
+        .led.green { background: #2bd48f; box-shadow: 0 0 12px #2bd48f; }
+        .led.red { background: #d84d5c; box-shadow: 0 0 12px #d84d5c; }
+
+        .info-card .big {
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+
+        .muted {
+            color: #9fb1d7;
+            font-size: 14px;
+        }
+
+        .summary-card {
+            padding: 18px;
+        }
+
+        .summary-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 14px;
+            gap: 12px;
+        }
+
+        .summary-header h3 {
+            font-size: 15px;
+            color: #c4d1ee;
+            font-weight: 500;
+        }
+
+        .summary-header h2 {
+            font-size: 30px;
+        }
+
+        .badge {
+            padding: 8px 12px;
+            border-radius: 999px;
+            background: rgba(47, 208, 127, 0.16);
+            color: #75e8a6;
+            font-size: 13px;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+
+        .summary-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .summary-item {
+            background: rgba(0,0,0,0.14);
+            border: 1px solid rgba(255,255,255,0.04);
+            border-radius: 18px;
+            padding: 16px 18px;
+        }
+
+        .summary-item small {
+            display: block;
+            color: #8fa8d3;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            font-size: 11px;
+            margin-bottom: 8px;
+        }
+
+        .summary-item strong {
+            font-size: 18px;
+        }
+
+        .history-table {
+            padding: 18px;
+        }
+
+        .history-table h3 {
+            margin-bottom: 14px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            overflow: hidden;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            font-size: 14px;
+        }
+
+        th {
+            color: #a8bbdf;
+            font-weight: 600;
+        }
+
+        td {
+            color: #e7edfb;
+        }
+
+        .success {
+            margin: 0 24px;
+            margin-top: 18px;
+            background: rgba(43, 212, 143, 0.14);
+            border: 1px solid rgba(43, 212, 143, 0.22);
+            color: #83f3b8;
+            padding: 14px 16px;
+            border-radius: 16px;
+        }
+
+        @media (max-width: 1100px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 760px) {
+            .topbar {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 16px;
+            }
+
+            .mini-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .panel {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .status-banner strong,
+            .summary-header h2 {
+                font-size: 28px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="topbar">
+            <div class="brand">
+                <div class="brand-icon">⟲</div>
+                <div>
+                    <small>Reactor biológico</small>
+                    <h1>Sistema de limpieza ultrasónica del reactor</h1>
+                </div>
+            </div>
+            <div class="nav">
+                <a href="#" class="active">Panel principal</a>
+                <a href="alertas.php">Alertas</a>
+                <a href="Historico.php">Histórico</a>
+            </div>
+        </div>
+
+        <?php if (isset($_GET['ok'])): ?>
+            <div class="success">Registro de limpieza guardado correctamente.</div>
+        <?php endif; ?>
+
+        <div class="main-grid">
+            <div class="left-col">
+                <div class="section-title">
+                    <div class="section-icon">⌁</div>
+                    <div>
+                        <h2>Panel principal de operación</h2>
+                        <p>Monitoreo rápido del estado del sistema, control manual y resumen operativo del sensor.</p>
+                    </div>
+                </div>
+
+                <div class="status-banner <?php echo $estadoClase; ?>">
+                    <div>
+                        <small>Estado actual</small>
+                        <strong><?php echo htmlspecialchars($estadoSistema); ?></strong>
+                    </div>
+                    <span class="status-dot"></span>
+                </div>
+
+                <div class="panel">
+                    <div>
+                        <h3>Control operativo</h3>
+                        <p style="font-size: 22px;">Limpieza manual del sensor</p>
+                    </div>
+                    <form method="POST">
+                        <button type="submit" name="iniciar_limpieza" class="btn">Iniciar limpieza manual</button>
+                    </form>
+                </div>
+
+                <div class="mini-grid">
+                    <div class="info-card">
+                        <h4>Indicador LED tricolor</h4>
+                        <div class="leds">
+                            <span class="led yellow"></span>
+                            <span class="led green"></span>
+                            <span class="led red"></span>
+                            <span class="muted">
+                                <?php echo $ultimaAlerta ? 'Alerta activa / revisar dispositivo' : 'Espera activa / lecturas válidas'; ?>
+                            </span>
+                        </div>
+                    </div>
+
+                    <div class="info-card">
+                        <h4>Disponibilidad de lecturas</h4>
+                        <div class="big"><?php echo htmlspecialchars($mensajeLectura); ?></div>
+                        <div class="muted">
+                            <?php if ($temperaturaActual !== null): ?>
+                                Temperatura actual: <?php echo number_format((float)$temperaturaActual, 2); ?> °C
+                            <?php else: ?>
+                                Aún no hay datos de temperatura.
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="history-table" id="historial">
+                    <h3>Historial reciente de temperatura</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Fecha y hora</th>
+                                <th>Temperatura</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if ($historial): ?>
+                                <?php foreach ($historial as $fila): ?>
+                                    <tr>
+                                        <td><?php echo formatearFecha($fila['fecha_hora']); ?></td>
+                                        <td><?php echo number_format((float)$fila['temperatura'], 2); ?> °C</td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php else: ?>
+                                <tr>
+                                    <td colspan="2">No hay datos registrados.</td>
+                                </tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="right-col" id="resumen">
+                <div class="summary-card">
+                    <div class="summary-header">
+                        <div>
+                            <h3>Resumen del sistema</h3>
+                            <h2>Estado operativo actual</h2>
+                        </div>
+                        <div class="badge"><?php echo htmlspecialchars($mensajeResultado); ?></div>
+                    </div>
+
+                    <div class="summary-list">
+                        <div class="summary-item">
+                            <small>Sensor activo</small>
+                            <strong>Sensor de temperatura</strong>
+                        </div>
+
+                        <div class="summary-item">
+                            <small>Último ciclo de limpieza</small>
+                            <strong><?php echo htmlspecialchars(formatearFecha($fechaLimpieza)); ?></strong>
+                        </div>
+
+                        <div class="summary-item">
+                            <small>Temperatura actual</small>
+                            <strong>
+                                <?php echo $temperaturaActual !== null ? number_format((float)$temperaturaActual, 2) . ' °C' : 'Sin registro'; ?>
+                            </strong>
+                        </div>
+
+                        <div class="summary-item">
+                            <small>Modo</small>
+                            <strong><?php echo htmlspecialchars(ucfirst($modoActual)); ?></strong><br>
+                            <span class="muted">Actualizado: <?php echo htmlspecialchars(formatearFecha($fechaModo)); ?></span>
+                        </div>
+
+                        <div class="summary-item">
+                            <small>Alertas</small>
+                            <strong><?php echo (int)($totalAlertas['total'] ?? 0); ?> registradas</strong><br>
+                            <span class="muted"><?php echo htmlspecialchars($alertaActual); ?></span>
+                        </div>
+
+                        <div class="summary-item">
+                            <small>Última falla reportada</small>
+                            <strong><?php echo htmlspecialchars(formatearFecha($fechaAlerta)); ?></strong>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
