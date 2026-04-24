@@ -1,0 +1,33 @@
+CREATE DATABASE sistema_limpieza;
+USE sistema_limpieza;
+
+-- Tabla: datos
+-- Guarda historial de temperatura
+CREATE TABLE datos (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    fecha_hora DATETIME NOT NULL,
+    temperatura DECIMAL(5,2) NOT NULL
+);
+
+-- Tabla: modo
+-- Guarda si el dispositivo está en modo manual o automático
+CREATE TABLE modo (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    tipo_modo ENUM('manual', 'automatico') NOT NULL,
+    fecha_hora DATETIME NOT NULL
+);
+
+-- Tabla: alertas
+-- Guarda fallas del dispositivo con fecha y hora
+CREATE TABLE alertas (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    descripcion VARCHAR(255) NOT NULL,
+    fecha_hora DATETIME NOT NULL
+);
+
+-- Tabla: limpieza
+-- Guarda registros de limpieza con fecha y hora
+CREATE TABLE limpieza (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    fecha_hora DATETIME NOT NULL
+);
