@@ -1,0 +1,652 @@
+<?php
+$host = 'localhost';
+$db   = 'sistema_limpieza';
+$user = 'root';
+$pass = '';
+$charset = 'utf8mb4';
+
+$dsn = "mysql:host=$host;dbname=$db;charset=$charset";
+$options = [
+    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    PDO::ATTR_EMULATE_PREPARES => false,
+];
+
+try {
+    $pdo = new PDO($dsn, $user, $pass, $options);
+} catch (Exception $e) {
+    die('Error de conexión a la base de datos: ' . $e->getMessage());
+}
+
+$datosTemperatura = $pdo->query("SELECT id, fecha_hora, temperatura FROM datos ORDER BY fecha_hora ASC")->fetchAll();
+$datosTabla = $pdo->query("SELECT id, fecha_hora, temperatura FROM datos ORDER BY fecha_hora DESC")->fetchAll();
+$modos = $pdo->query("SELECT id, tipo_modo, fecha_hora FROM modo ORDER BY fecha_hora DESC")->fetchAll();
+$alertas = $pdo->query("SELECT id, descripcion, fecha_hora FROM alertas ORDER BY fecha_hora DESC")->fetchAll();
+$limpiezas = $pdo->query("SELECT id, fecha_hora FROM limpieza ORDER BY fecha_hora DESC")->fetchAll();
+
+$totalCiclos = count($limpiezas);
+$totalFallas = count($alertas);
+$ultimaLimpieza = $limpiezas[0]['fecha_hora'] ?? null;
+
+$promedioHoras = 'Sin datos';
+if (count($limpiezas) >= 2) {
+    $ordenAsc = $pdo->query("SELECT fecha_hora FROM limpieza ORDER BY fecha_hora ASC")->fetchAll(PDO::FETCH_COLUMN);
+    $intervalos = [];
+    for ($i = 1; $i < count($ordenAsc); $i++) {
+        $anterior = strtotime($ordenAsc[$i - 1]);
+        $actual = strtotime($ordenAsc[$i]);
+        $intervalos[] = ($actual - $anterior) / 3600;
+    }
+    if (count($intervalos) > 0) {
+        $promedioHoras = number_format(array_sum($intervalos) / count($intervalos), 1) . ' hrs';
+    }
+}
+
+$eventos = [];
+foreach ($limpiezas as $item) {
+    $eventos[] = [
+        'fecha_hora' => $item['fecha_hora'],
+        'tipo' => 'Limpieza',
+        'detalle' => 'Inicio de limpieza manual'
+    ];
+}
+foreach ($alertas as $item) {
+    $eventos[] = [
+        'fecha_hora' => $item['fecha_hora'],
+        'tipo' => 'Alerta',
+        'detalle' => $item['descripcion']
+    ];
+}
+foreach ($modos as $item) {
+    $eventos[] = [
+        'fecha_hora' => $item['fecha_hora'],
+        'tipo' => 'Modo',
+        'detalle' => 'Cambio a modo ' . ucfirst($item['tipo_modo'])
+    ];
+}
+
+usort($eventos, function ($a, $b) {
+    return strtotime($b['fecha_hora']) <=> strtotime($a['fecha_hora']);
+});
+
+$eventosRecientes = array_slice($eventos, 0, 6);
+
+$labelsGrafica = [];
+$valoresGrafica = [];
+foreach ($datosTemperatura as $fila) {
+    $labelsGrafica[] = date('d/m H:i', strtotime($fila['fecha_hora']));
+    $valoresGrafica[] = (float) $fila['temperatura'];
+}
+
+function formatearFechaHora($fecha) {
+    if (!$fecha) {
+        return 'Sin registro';
+    }
+    return date('d/m/Y H:i', strtotime($fecha));
+}
+
+function formatearFecha($fecha) {
+    if (!$fecha) {
+        return 'Sin registro';
+    }
+    return date('d/m/Y', strtotime($fecha));
+}
+
+function formatearHora($fecha) {
+    if (!$fecha) {
+        return 'Sin registro';
+    }
+    return date('H:i', strtotime($fecha));
+}
+?>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Histórico del sistema de limpieza</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background: #091120;
+            color: #e7efff;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1450px;
+            margin: 0 auto;
+            background: radial-gradient(circle at top left, #173055, #0d1730 58%, #08101e);
+            border: 1px solid rgba(84, 109, 168, 0.22);
+            border-radius: 28px;
+            box-shadow: 0 18px 45px rgba(0, 0, 0, 0.45);
+            overflow: hidden;
+        }
+
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 22px 28px;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            gap: 20px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .brand-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 14px;
+            background: linear-gradient(135deg, #0f6079, #13243d);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #81f0ff;
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .brand small {
+            display: block;
+            color: #84a4d9;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            font-size: 11px;
+            margin-bottom: 2px;
+        }
+
+        .brand h1 {
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .nav {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .nav a {
+            text-decoration: none;
+            color: #e8eefc;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.08);
+            padding: 10px 18px;
+            border-radius: 18px;
+            font-size: 14px;
+        }
+
+        .nav a.active {
+            border-color: #58def4;
+            box-shadow: inset 0 0 0 1px #58def4;
+        }
+
+        .content {
+            padding: 24px;
+        }
+
+        .section-title {
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+            margin-bottom: 18px;
+        }
+
+        .section-icon {
+            width: 38px;
+            height: 38px;
+            border-radius: 14px;
+            background: rgba(41, 189, 224, 0.12);
+            border: 1px solid rgba(88, 222, 244, 0.18);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #79e9ff;
+            flex-shrink: 0;
+        }
+
+        .section-title h2 {
+            font-size: 18px;
+            margin-bottom: 4px;
+        }
+
+        .section-title p {
+            color: #a0b2d8;
+            font-size: 13px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-bottom: 18px;
+        }
+
+        .card,
+        .chart-panel,
+        .events-panel,
+        .table-panel {
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 22px;
+            box-shadow: 0 14px 30px rgba(0,0,0,0.18);
+        }
+
+        .card {
+            padding: 18px 20px;
+            min-height: 92px;
+        }
+
+        .card small {
+            display: block;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            font-size: 11px;
+            color: #8fa8d3;
+            margin-bottom: 10px;
+        }
+
+        .card strong {
+            font-size: 30px;
+            line-height: 1.1;
+        }
+
+        .middle-grid {
+            display: grid;
+            grid-template-columns: 1.45fr 1fr;
+            gap: 16px;
+            margin-bottom: 18px;
+        }
+
+        .chart-panel,
+        .events-panel,
+        .table-panel {
+            padding: 18px;
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 14px;
+            flex-wrap: wrap;
+        }
+
+        .panel-header h3 {
+            font-size: 18px;
+            margin-bottom: 4px;
+        }
+
+        .panel-header p {
+            color: #9fb1d7;
+            font-size: 13px;
+        }
+
+        .filters {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .filter-badge {
+            background: rgba(0,0,0,0.18);
+            border: 1px solid rgba(255,255,255,0.06);
+            color: #eaf2ff;
+            padding: 10px 14px;
+            border-radius: 14px;
+            font-size: 13px;
+        }
+
+        .chart-box {
+            height: 320px;
+            background: rgba(10,17,34,0.25);
+            border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 18px;
+            padding: 14px;
+        }
+
+        .events-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .event-item {
+            background: rgba(9, 16, 34, 0.42);
+            border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 14px;
+        }
+
+        .event-item strong {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 14px;
+        }
+
+        .event-meta {
+            color: #90aad7;
+            font-size: 12px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            overflow: hidden;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 13px 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            font-size: 14px;
+        }
+
+        th {
+            color: #a8bbdf;
+            font-weight: 600;
+        }
+
+        td {
+            color: #e7edfb;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 7px 12px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .badge.temp { background: rgba(83, 224, 241, 0.18); color: #86f2ff; }
+        .badge.modo { background: rgba(255, 207, 86, 0.18); color: #ffd66d; }
+        .badge.alerta { background: rgba(255, 109, 132, 0.18); color: #ff9ead; }
+        .badge.limpieza { background: rgba(71, 212, 145, 0.18); color: #82f1bd; }
+
+        .empty {
+            color: #9fb1d7;
+            padding: 10px 0;
+        }
+
+        @media (max-width: 1200px) {
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .middle-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 760px) {
+            .topbar {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .card strong {
+                font-size: 24px;
+            }
+
+            .chart-box {
+                height: 260px;
+            }
+
+            th, td {
+                font-size: 12px;
+                padding: 10px 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="topbar">
+            <div class="brand">
+                <div class="brand-icon">⟲</div>
+                <div>
+                    <small>Reactor biológico</small>
+                    <h1>Sistema de limpieza ultrasónica del reactor</h1>
+                </div>
+            </div>
+            <div class="nav">
+                <a href="main.php">Panel principal</a>
+                <a href="alertas.php">Alertas</a>
+                <a href="historico.php" class="active">Histórico</a>
+            </div>
+        </div>
+
+        <div class="content">
+            <div class="section-title">
+                <div class="section-icon">◔</div>
+                <div>
+                    <h2>Pantalla de histórico y análisis</h2>
+                    <p>Tendencia temporal del sensor, eventos de limpieza y trazabilidad de datos ejecutados.</p>
+                </div>
+            </div>
+
+            <div class="stats-grid">
+                <div class="card">
+                    <small>Total de ciclos</small>
+                    <strong><?php echo $totalCiclos; ?></strong>
+                </div>
+                <div class="card">
+                    <small>Fallas detectadas</small>
+                    <strong><?php echo $totalFallas; ?></strong>
+                </div>
+                <div class="card">
+                    <small>Última limpieza</small>
+                    <strong style="font-size: 22px;"><?php echo htmlspecialchars(formatearFechaHora($ultimaLimpieza)); ?></strong>
+                </div>
+                <div class="card">
+                    <small>Promedio entre limpiezas</small>
+                    <strong style="font-size: 24px;"><?php echo htmlspecialchars($promedioHoras); ?></strong>
+                </div>
+            </div>
+
+            <div class="middle-grid">
+                <div class="chart-panel">
+                    <div class="panel-header">
+                        <div>
+                            <h3>Gráfica histórica</h3>
+                            <p>Comportamiento de la temperatura registrada por el sensor.</p>
+                        </div>
+                        <div class="filters">
+                            <div class="filter-badge">Todos los registros</div>
+                            <div class="filter-badge">Sensor de temperatura</div>
+                        </div>
+                    </div>
+                    <div class="chart-box">
+                        <canvas id="graficaTemperatura"></canvas>
+                    </div>
+                </div>
+
+                <div class="events-panel" id="eventos">
+                    <div class="panel-header">
+                        <div>
+                            <h3>Eventos recientes</h3>
+                            <p>Últimos cambios y registros del sistema.</p>
+                        </div>
+                    </div>
+
+                    <div class="events-list">
+                        <?php if ($eventosRecientes): ?>
+                            <?php foreach ($eventosRecientes as $evento): ?>
+                                <div class="event-item">
+                                    <strong><?php echo htmlspecialchars($evento['detalle']); ?></strong>
+                                    <div class="event-meta">
+                                        <?php echo htmlspecialchars($evento['tipo']); ?> · <?php echo htmlspecialchars(formatearFechaHora($evento['fecha_hora'])); ?>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <div class="empty">No hay eventos registrados.</div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+
+            <div class="table-panel">
+                <div class="panel-header">
+                    <div>
+                        <h3>Tabla de historial general</h3>
+                        <p>Consulta completa de temperaturas, modos, alertas y limpiezas.</p>
+                    </div>
+                </div>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Tipo</th>
+                            <th>Fecha</th>
+                            <th>Hora</th>
+                            <th>Detalle</th>
+                            <th>Valor / Estado</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php
+                        $historialGeneral = [];
+
+                        foreach ($datosTabla as $fila) {
+                            $historialGeneral[] = [
+                                'tipo' => 'Temperatura',
+                                'fecha_hora' => $fila['fecha_hora'],
+                                'detalle' => 'Lectura registrada por el sensor',
+                                'valor' => number_format((float)$fila['temperatura'], 2) . ' °C',
+                                'clase' => 'temp'
+                            ];
+                        }
+
+                        foreach ($modos as $fila) {
+                            $historialGeneral[] = [
+                                'tipo' => 'Modo',
+                                'fecha_hora' => $fila['fecha_hora'],
+                                'detalle' => 'Cambio de modo del dispositivo',
+                                'valor' => ucfirst($fila['tipo_modo']),
+                                'clase' => 'modo'
+                            ];
+                        }
+
+                        foreach ($alertas as $fila) {
+                            $historialGeneral[] = [
+                                'tipo' => 'Alerta',
+                                'fecha_hora' => $fila['fecha_hora'],
+                                'detalle' => $fila['descripcion'],
+                                'valor' => 'Falla detectada',
+                                'clase' => 'alerta'
+                            ];
+                        }
+
+                        foreach ($limpiezas as $fila) {
+                            $historialGeneral[] = [
+                                'tipo' => 'Limpieza',
+                                'fecha_hora' => $fila['fecha_hora'],
+                                'detalle' => 'Registro de limpieza ejecutada',
+                                'valor' => 'Ejecutada',
+                                'clase' => 'limpieza'
+                            ];
+                        }
+
+                        usort($historialGeneral, function ($a, $b) {
+                            return strtotime($b['fecha_hora']) <=> strtotime($a['fecha_hora']);
+                        });
+                        ?>
+
+                        <?php if ($historialGeneral): ?>
+                            <?php foreach ($historialGeneral as $fila): ?>
+                                <tr>
+                                    <td><span class="badge <?php echo htmlspecialchars($fila['clase']); ?>"><?php echo htmlspecialchars($fila['tipo']); ?></span></td>
+                                    <td><?php echo htmlspecialchars(formatearFecha($fila['fecha_hora'])); ?></td>
+                                    <td><?php echo htmlspecialchars(formatearHora($fila['fecha_hora'])); ?></td>
+                                    <td><?php echo htmlspecialchars($fila['detalle']); ?></td>
+                                    <td><?php echo htmlspecialchars($fila['valor']); ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <tr>
+                                <td colspan="5">No hay datos disponibles para mostrar.</td>
+                            </tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const labels = <?php echo json_encode($labelsGrafica, JSON_UNESCAPED_UNICODE); ?>;
+        const valores = <?php echo json_encode($valoresGrafica, JSON_UNESCAPED_UNICODE); ?>;
+
+        const ctx = document.getElementById('graficaTemperatura');
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Temperatura (°C)',
+                    data: valores,
+                    borderColor: '#6fe8ff',
+                    backgroundColor: 'rgba(111, 232, 255, 0.18)',
+                    fill: true,
+                    tension: 0.35,
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                    pointBackgroundColor: '#6fe8ff'
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        labels: {
+                            color: '#dce8ff'
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        ticks: {
+                            color: '#9fb1d7',
+                            maxRotation: 0,
+                            autoSkip: true,
+                            maxTicksLimit: 8
+                        },
+                        grid: {
+                            color: 'rgba(255,255,255,0.05)'
+                        }
+                    },
+                    y: {
+                        ticks: {
+                            color: '#9fb1d7'
+                        },
+                        grid: {
+                            color: 'rgba(255,255,255,0.05)'
+                        }
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
