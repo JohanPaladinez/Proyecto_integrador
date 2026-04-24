@@ -1,0 +1,650 @@
+|<?php
+$host = 'localhost';
+$db   = 'sistema_limpieza';
+$user = 'root';
+$pass = '';
+$charset = 'utf8mb4';
+
+$dsn = "mysql:host=$host;dbname=$db;charset=$charset";
+$options = [
+    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    PDO::ATTR_EMULATE_PREPARES => false,
+];
+
+try {
+    $pdo = new PDO($dsn, $user, $pass, $options);
+} catch (Exception $e) {
+    die('Error de conexión a la base de datos: ' . $e->getMessage());
+}
+
+$alertas = $pdo->query("SELECT id, descripcion, fecha_hora FROM alertas ORDER BY fecha_hora DESC")->fetchAll();
+$ultimaAlerta = $alertas[0] ?? null;
+
+$total24h = $pdo->query("SELECT COUNT(*) AS total FROM alertas WHERE fecha_hora >= DATE_SUB(NOW(), INTERVAL 24 HOUR)")->fetch();
+$totalAlertas24h = (int)($total24h['total'] ?? 0);
+
+function formatearFechaHora($fecha) {
+    if (!$fecha) {
+        return 'Sin registro';
+    }
+    return date('d/m/Y H:i', strtotime($fecha));
+}
+
+function horasDesde($fecha) {
+    if (!$fecha) {
+        return 'Sin datos';
+    }
+
+    $diferencia = time() - strtotime($fecha);
+    if ($diferencia < 3600) {
+        $minutos = max(1, floor($diferencia / 60));
+        return $minutos . ' min';
+    }
+
+    $horas = floor($diferencia / 3600);
+    return $horas . ' horas';
+}
+
+function obtenerSeveridad($descripcion) {
+    $texto = mb_strtolower($descripcion, 'UTF-8');
+
+    if (
+        str_contains($texto, 'falla') ||
+        str_contains($texto, 'error') ||
+        str_contains($texto, 'no activ') ||
+        str_contains($texto, 'desconex')
+    ) {
+        return ['nombre' => 'Alta', 'clase' => 'alta'];
+    }
+
+    if (
+        str_contains($texto, 'interrup') ||
+        str_contains($texto, 'reinicio') ||
+        str_contains($texto, 'fuera de rango') ||
+        str_contains($texto, 'respuesta')
+    ) {
+        return ['nombre' => 'Media', 'clase' => 'media'];
+    }
+
+    return ['nombre' => 'Baja', 'clase' => 'baja'];
+}
+
+$estadoAlerta = $ultimaAlerta ? 'Alerta activa' : 'Sin alertas activas';
+$claseEstado = $ultimaAlerta ? 'alert-active' : 'alert-ok';
+$moduloEstado = $ultimaAlerta ? 'Requiere inspección' : 'Operación normal';
+$condicionEstado = $totalAlertas24h > 0 ? 'Monitoreo preventivo' : 'Operación estable';
+$tiempoUltimaAlerta = $ultimaAlerta ? horasDesde($ultimaAlerta['fecha_hora']) : 'Sin datos';
+?>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alertas del sistema</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background: #091120;
+            color: #e7efff;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1450px;
+            margin: 0 auto;
+            background: radial-gradient(circle at top left, #173055, #0d1730 58%, #08101e);
+            border: 1px solid rgba(84, 109, 168, 0.22);
+            border-radius: 28px;
+            box-shadow: 0 18px 45px rgba(0, 0, 0, 0.45);
+            overflow: hidden;
+        }
+
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 22px 28px;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            gap: 20px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .brand-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 14px;
+            background: linear-gradient(135deg, #0f6079, #13243d);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #81f0ff;
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .brand small {
+            display: block;
+            color: #84a4d9;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            font-size: 11px;
+            margin-bottom: 2px;
+        }
+
+        .brand h1 {
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .nav {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .nav a {
+            text-decoration: none;
+            color: #e8eefc;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.08);
+            padding: 10px 18px;
+            border-radius: 18px;
+            font-size: 14px;
+        }
+
+        .nav a.active {
+            border-color: #58def4;
+            box-shadow: inset 0 0 0 1px #58def4;
+        }
+
+        .content {
+            padding: 24px;
+        }
+
+        .section-title {
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+            margin-bottom: 18px;
+        }
+
+        .section-icon {
+            width: 38px;
+            height: 38px;
+            border-radius: 14px;
+            background: rgba(41, 189, 224, 0.12);
+            border: 1px solid rgba(88, 222, 244, 0.18);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #79e9ff;
+            flex-shrink: 0;
+        }
+
+        .section-title h2 {
+            font-size: 18px;
+            margin-bottom: 4px;
+        }
+
+        .section-title p {
+            color: #a0b2d8;
+            font-size: 13px;
+        }
+
+        .status-banner,
+        .panel,
+        .side-panel,
+        .summary-card,
+        .alert-row,
+        .action-button,
+        .modal-box {
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 22px;
+            box-shadow: 0 14px 30px rgba(0,0,0,0.18);
+        }
+
+        .status-banner {
+            padding: 22px 24px;
+            margin-bottom: 18px;
+        }
+
+        .status-banner small {
+            display: block;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+            font-size: 11px;
+            margin-bottom: 8px;
+            opacity: 0.9;
+        }
+
+        .status-banner strong {
+            font-size: 38px;
+            line-height: 1;
+        }
+
+        .alert-active {
+            background: linear-gradient(90deg, #e0002f, #d92768);
+            color: #ffffff;
+        }
+
+        .alert-ok {
+            background: linear-gradient(90deg, #24c87b, #149f7c);
+            color: #ffffff;
+        }
+
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1.65fr 1fr;
+            gap: 18px;
+        }
+
+        .panel,
+        .side-panel,
+        .summary-card {
+            padding: 18px;
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 14px;
+            flex-wrap: wrap;
+        }
+
+        .panel-header h3 {
+            font-size: 18px;
+            margin-bottom: 4px;
+        }
+
+        .panel-header p,
+        .muted {
+            color: #9fb1d7;
+            font-size: 13px;
+        }
+
+        .alert-list {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .alert-row {
+            padding: 18px;
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            gap: 16px;
+            align-items: center;
+        }
+
+        .alert-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            flex-shrink: 0;
+            background: rgba(224, 0, 47, 0.12);
+            color: #ff8da8;
+        }
+
+        .severity {
+            display: inline-flex;
+            align-items: center;
+            padding: 7px 12px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+
+        .severity.alta {
+            background: rgba(255, 82, 111, 0.18);
+            color: #ff9eb0;
+        }
+
+        .severity.media {
+            background: rgba(255, 202, 87, 0.18);
+            color: #ffd978;
+        }
+
+        .severity.baja {
+            background: rgba(86, 223, 154, 0.18);
+            color: #8bf3be;
+        }
+
+        .alert-info h4 {
+            font-size: 24px;
+            margin-bottom: 6px;
+        }
+
+        .alert-info p {
+            font-size: 13px;
+            color: #9fb1d7;
+        }
+
+        .row-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+
+        .btn {
+            border: none;
+            border-radius: 14px;
+            padding: 12px 16px;
+            font-weight: 700;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        .btn-detail {
+            background: rgba(41, 189, 224, 0.12);
+            color: #89ebff;
+            border: 1px solid rgba(88, 222, 244, 0.22);
+        }
+
+        .btn-action {
+            background: rgba(255,255,255,0.06);
+            color: #e7efff;
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+
+        .side-stack {
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+        }
+
+        .actions-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-top: 8px;
+        }
+
+        .action-button {
+            padding: 16px;
+            background: rgba(9, 16, 34, 0.42);
+            color: #e9f2ff;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        .summary-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-top: 8px;
+        }
+
+        .summary-item {
+            background: rgba(9, 16, 34, 0.42);
+            border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 16px;
+        }
+
+        .summary-item small {
+            display: block;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+            font-size: 11px;
+            color: #8fa8d3;
+            margin-bottom: 8px;
+        }
+
+        .summary-item strong {
+            font-size: 22px;
+        }
+
+        .empty-state {
+            padding: 24px;
+            text-align: center;
+            color: #9fb1d7;
+        }
+
+        .feedback {
+            margin-bottom: 16px;
+            padding: 14px 16px;
+            border-radius: 16px;
+            background: rgba(43, 212, 143, 0.14);
+            border: 1px solid rgba(43, 212, 143, 0.22);
+            color: #83f3b8;
+        }
+
+        .modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(4, 10, 22, 0.72);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            z-index: 50;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-box {
+            width: 100%;
+            max-width: 520px;
+            padding: 22px;
+            background: #13203a;
+        }
+
+        .modal-box h3 {
+            margin-bottom: 12px;
+        }
+
+        .modal-box p {
+            color: #b7c7e7;
+            line-height: 1.6;
+            margin-bottom: 10px;
+        }
+
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 14px;
+        }
+
+        @media (max-width: 1180px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 860px) {
+            .topbar {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .alert-row {
+                grid-template-columns: 1fr;
+            }
+
+            .row-actions {
+                justify-content: flex-start;
+            }
+
+            .status-banner strong {
+                font-size: 30px;
+            }
+
+            .alert-info h4,
+            .summary-item strong {
+                font-size: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="topbar">
+            <div class="brand">
+                <div class="brand-icon">⟲</div>
+                <div>
+                    <small>Reactor biológico</small>
+                    <h1>Sistema de limpieza ultrasónica del reactor</h1>
+                </div>
+            </div>
+            <div class="nav">
+                <a href="main.php">Panel principal</a>
+                <a href="alertas.php" class="active">Alertas</a>
+                <a href="historico.php">Histórico</a>
+            </div>
+        </div>
+
+        <div class="content">
+            <?php if (isset($_GET['ok'])): ?>
+                <div class="feedback">Atención registrada visualmente. Si quieres guardarla en la base de datos, te ayudo a agregar esa función.</div>
+            <?php endif; ?>
+
+            <div class="section-title">
+                <div class="section-icon">⚠</div>
+                <div>
+                    <h2>Pantalla de alertas</h2>
+                    <p>Monitoreo técnico de fallas, severidad y acciones rápidas de mantenimiento.</p>
+                </div>
+            </div>
+
+            <div class="status-banner <?php echo $claseEstado; ?>">
+                <small>Estado de alerta</small>
+                <strong><?php echo htmlspecialchars($estadoAlerta); ?></strong>
+            </div>
+
+            <div class="main-grid">
+                <div class="panel">
+                    <div class="panel-header">
+                        <div>
+                            <h3>Lista de fallas del sistema</h3>
+                        </div>
+                        <div class="muted">Últimas 24 horas: <?php echo $totalAlertas24h; ?></div>
+                    </div>
+
+                    <?php if ($alertas): ?>
+                        <div class="alert-list">
+                            <?php foreach ($alertas as $alerta): ?>
+                                <?php $sev = obtenerSeveridad($alerta['descripcion']); ?>
+                                <div class="alert-row">
+                                    <div class="alert-icon">🛡</div>
+
+                                    <div class="alert-info">
+                                        <span class="severity <?php echo htmlspecialchars($sev['clase']); ?>"><?php echo htmlspecialchars($sev['nombre']); ?></span>
+                                        <h4><?php echo htmlspecialchars($alerta['descripcion']); ?></h4>
+                                        <p>Evento registrado: <?php echo htmlspecialchars(formatearFechaHora($alerta['fecha_hora'])); ?></p>
+                                    </div>
+
+                                    <div class="row-actions">
+                                        <button
+                                            class="btn btn-detail"
+                                            type="button"
+                                            onclick="abrirDetalle('<?php echo htmlspecialchars(addslashes($alerta['descripcion'])); ?>', '<?php echo htmlspecialchars(formatearFechaHora($alerta['fecha_hora'])); ?>', '<?php echo htmlspecialchars($sev['nombre']); ?>')"
+                                        >Ver detalle</button>
+                                        <a class="btn btn-action" href="alertas.php?ok=1">Registrar atención</a>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php else: ?>
+                        <div class="empty-state">No hay alertas registradas en el sistema.</div>
+                    <?php endif; ?>
+                </div>
+
+                <div class="side-stack">
+                    <div class="side-panel">
+                        <div class="panel-header">
+                            <div>
+                                <h3>Acciones rápidas</h3>
+                            </div>
+                        </div>
+
+                        <div class="actions-list">
+                            <div class="action-button">Reiniciar módulo</div>
+                            <div class="action-button">Revisar conexión eléctrica</div>
+                            <div class="action-button">Marcar evento como atendido</div>
+                        </div>
+                    </div>
+
+                    <div class="summary-card">
+                        <div class="panel-header">
+                            <div>
+                                <h3>Resumen técnico</h3>
+                            </div>
+                        </div>
+
+                        <div class="summary-list">
+                            <div class="summary-item">
+                                <small>Módulo</small>
+                                <strong><?php echo htmlspecialchars($moduloEstado); ?></strong>
+                            </div>
+
+                            <div class="summary-item">
+                                <small>Condición</small>
+                                <strong><?php echo htmlspecialchars($condicionEstado); ?></strong>
+                            </div>
+
+                            <div class="summary-item">
+                                <small>Tiempo desde última alerta</small>
+                                <strong><?php echo htmlspecialchars($tiempoUltimaAlerta); ?></strong>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="modalDetalle">
+        <div class="modal-box">
+            <h3>Detalle de alerta</h3>
+            <p id="detalleDescripcion"></p>
+            <p><strong>Fecha y hora:</strong> <span id="detalleFecha"></span></p>
+            <p><strong>Severidad:</strong> <span id="detalleSeveridad"></span></p>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-action" onclick="cerrarDetalle()">Cerrar</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function abrirDetalle(descripcion, fecha, severidad) {
+            document.getElementById('detalleDescripcion').textContent = descripcion;
+            document.getElementById('detalleFecha').textContent = fecha;
+            document.getElementById('detalleSeveridad').textContent = severidad;
+            document.getElementById('modalDetalle').classList.add('active');
+        }
+
+        function cerrarDetalle() {
+            document.getElementById('modalDetalle').classList.remove('active');
+        }
+
+        document.getElementById('modalDetalle').addEventListener('click', function (e) {
+            if (e.target === this) {
+                cerrarDetalle();
+            }
+        });
+    </script>
+</body>
+</html>
