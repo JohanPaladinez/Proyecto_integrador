@@ -1,222 +1,1055 @@
 #include <WiFi.h>
-#include <math.h>
+#include <HTTPClient.h>
+#include "SD_MMC.h"
+#include <ThreeWire.h>
+#include <RtcDS1302.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <math.h>
 
-// -------------------------
-// Pines
-// -------------------------
-static const uint8_t DS18B20_PIN = 21;
+// =====================================================
+// WIFI
+// =====================================================
+
+const char* ssid = "";
+const char* password = "";
+
+const char* serverName =
+"http://192.168.x.x/conexion/.php";
+
+// =====================================================
+// SD
+// =====================================================
+
+const char* TEMP_PATH = "/temperatura.csv";
+const char* CICLOS_PATH = "/ciclos.csv";
+const char* ALERTAS_PATH = "/alertas.csv";
+
+const char* TEMP_SYNC_PATH = "/temp_sync.csv";
+const char* CICLOS_SYNC_PATH = "/ciclos_sync.csv";
+const char* ALERTAS_SYNC_PATH = "/alertas_sync.csv";
+
+// =====================================================
+// PINES
+// =====================================================
+
+static const uint8_t DS18B20_PIN = 4;
 
 static const uint8_t RELAY1_PIN = 32;
 static const uint8_t RELAY2_PIN = 33;
-static const bool RELAY_ACTIVE_HIGH = true;
 
-static const uint8_t BUTTON_PIN = 4;
+static const uint8_t BUTTON_PIN = 18;
 
 static const uint8_t LED_R_PIN = 25;
 static const uint8_t LED_G_PIN = 27;
 static const uint8_t LED_B_PIN = 26;
 
-static const uint8_t CURRENT_PIN = 34;
+// DS1302: ajustar estos pines segun el cableado.
+static const uint8_t DS1302_RST_PIN = 21;  // CE / RST
+static const uint8_t DS1302_DAT_PIN = 22;  // IO / DAT
+static const uint8_t DS1302_CLK_PIN = 19;  // SCLK / CLK
 
-// -------------------------
-// Tiempos
-// -------------------------
-static const unsigned long TIEMPO_ESPERA_MS   = 15000UL;    // 15 s
-static const unsigned long TIEMPO_LIMPIEZA_MS = 120000UL;   // 2 min
-static const unsigned long TIEMPO_FINAL_MS    = 5000UL;     // 5 s
+// =====================================================
+// RELAYS
+// =====================================================
 
-static const unsigned long INTERVALO_TEMP_MS = 600000UL;
-static const unsigned long DEBOUNCE_MS = 200UL;
+static const bool RELAY_ACTIVE_HIGH = false;
 
-// -------------------------
-// Corriente
-// -------------------------
-static const float SENSOR_SENSITIVITY = 0.066f;
-static const float VREF = 3.3f;
-static const int ADC_MAX_VALUE = 4095;
-static const int WINDOW_SIZE = 200;
-static const float LIMITE_SOBRECORRIENTE_RMS = 10.0f;
+// =====================================================
+// TIEMPOS
+// =====================================================
 
-// -------------------------
-// Objetos
-// -------------------------
+static const uint32_t TIEMPO_ESPERA_S   = 120;
+static const uint32_t TIEMPO_LIMPIEZA_S = 15;
+static const uint32_t TIEMPO_FINAL_S    = 5;
+
+static const uint32_t TIEMPO_POST_MS    = 120000;
+
+static const uint32_t DEBOUNCE_MS       = 200;
+
+// =====================================================
+// OBJETOS
+// =====================================================
+
+ThreeWire ds1302Wire(
+  DS1302_DAT_PIN,
+  DS1302_CLK_PIN,
+  DS1302_RST_PIN
+);
+
+RtcDS1302<ThreeWire> rtc(ds1302Wire);
+
 OneWire oneWire(DS18B20_PIN);
+
 DallasTemperature sensors(&oneWire);
 
-// -------------------------
-// Estados
-// -------------------------
+// =====================================================
+// ESTADOS
+// =====================================================
+
 enum EstadoSistema {
+
   ESPERA = 0,
   LIMPIANDO,
-  FINALIZADO,
-  FALLO
+  FINALIZADO
 };
 
 EstadoSistema estadoActual = ESPERA;
 
-// -------------------------
-unsigned long tInicioEstado = 0;
+// =====================================================
+// VARIABLES
+// =====================================================
+
+RtcDateTime inicioEstado;
+
+uint32_t cicloLimpieza = 0;
+
 unsigned long tUltimoBoton = 0;
-unsigned long tUltimaTemp = 0;
 
-float currentOffset = 0.0f;
-float samples[WINDOW_SIZE] = {0};
-int sampleIndex = 0;
-float currentRMS = 0.0f;
+unsigned long tUltimoPost = 0;
 
-// -------------------------
-// Utilidades
-// -------------------------
+bool esperandoConversion = false;
+
+unsigned long tSolicitudTemp = 0;
+
+bool sdDisponible = false;
+
+enum TipoSync {
+  SYNC_NINGUNO = 0,
+  SYNC_TEMPERATURA,
+  SYNC_CICLOS,
+  SYNC_ALERTAS
+};
+
+TipoSync estadoSync = SYNC_NINGUNO;
+File archivoSync;
+unsigned long tUltimoSync = 0;
+const uint32_t INTERVALO_SYNC_MS = 500;
+
+void conectarWiFi();
+
+// =====================================================
+// RGB
+// =====================================================
+
 void setRGB(bool r, bool g, bool b) {
+
   digitalWrite(LED_R_PIN, r);
+
   digitalWrite(LED_G_PIN, g);
+
   digitalWrite(LED_B_PIN, b);
 }
 
+// =====================================================
+// RELAYS
+// =====================================================
+
 void setRelay(bool on) {
-  digitalWrite(RELAY1_PIN, on ? LOW : HIGH);
-  digitalWrite(RELAY2_PIN, on ? LOW : HIGH);
+
+  bool activeState =
+    RELAY_ACTIVE_HIGH ? HIGH : LOW;
+
+  bool inactiveState =
+    RELAY_ACTIVE_HIGH ? LOW : HIGH;
+
+  digitalWrite(
+    RELAY1_PIN,
+    on ? activeState : inactiveState
+  );
+
+  digitalWrite(
+    RELAY2_PIN,
+    on ? activeState : inactiveState
+  );
 }
 
-// -------------------------
-// Corriente
-// -------------------------
-void initCurrentSensor() {
-  analogReadResolution(12);
-  analogSetPinAttenuation(CURRENT_PIN, ADC_11db);
+// =====================================================
+// SD LOG
+// =====================================================
 
-  float sum = 0;
-  for (int i = 0; i < 500; i++) {
-    float v = (analogRead(CURRENT_PIN) / (float)ADC_MAX_VALUE) * VREF;
-    sum += v;
-    delay(2);
+const char* nombreEstado(EstadoSistema estado) {
+
+  switch (estado) {
+
+    case ESPERA:
+      return "ESPERA";
+
+    case LIMPIANDO:
+      return "LIMPIANDO";
+
+    case FINALIZADO:
+      return "FINALIZADO";
   }
-  currentOffset = sum / 500.0f;
+
+  return "DESCONOCIDO";
 }
 
-float readCurrent() {
-  float v = (analogRead(CURRENT_PIN) / (float)ADC_MAX_VALUE) * VREF;
-  return (v - currentOffset) / SENSOR_SENSITIVITY;
+void fechaHoraActual(char* fecha,
+                     size_t fechaSize,
+                     char* hora,
+                     size_t horaSize) {
+
+  RtcDateTime ahora = rtc.GetDateTime();
+
+  snprintf(
+    fecha,
+    fechaSize,
+    "%04u-%02u-%02u",
+    ahora.Year(),
+    ahora.Month(),
+    ahora.Day()
+  );
+
+  snprintf(
+    hora,
+    horaSize,
+    "%02u:%02u:%02u",
+    ahora.Hour(),
+    ahora.Minute(),
+    ahora.Second()
+  );
 }
 
-void gestionarCorriente() {
-  samples[sampleIndex++] = readCurrent();
-  if (sampleIndex >= WINDOW_SIZE) sampleIndex = 0;
+void registrarTemperatura(float temperatura, const char* detalle) {
+  if (!sdDisponible) {
+    return;
+  }
 
-  static unsigned long t = 0;
-  if (millis() - t > 200) {
-    t = millis();
+  char fecha[11];
+  char hora[9];
 
-    float sum = 0;
-    for (int i = 0; i < WINDOW_SIZE; i++) sum += samples[i]*samples[i];
-    currentRMS = sqrt(sum / WINDOW_SIZE);
+  fechaHoraActual(
+    fecha,
+    sizeof(fecha),
+    hora,
+    sizeof(hora)
+  );
 
-    Serial.print("Corriente RMS: ");
-    Serial.println(currentRMS);
+  File file =
+    SD_MMC.open(TEMP_PATH, FILE_APPEND);
 
-    if (estadoActual == LIMPIANDO && currentRMS > LIMITE_SOBRECORRIENTE_RMS) {
-      Serial.println("FALLO: Sobrecorriente");
-      estadoActual = FALLO;
+  if (!file) {
+    Serial.println("Error al abrir archivo temperatura");
+    return;
+  }
+
+  file.print(fecha);
+  file.print(",");
+  file.print(hora);
+  file.print(",");
+  file.print(temperatura, 2);
+  file.print(",");
+  file.println(detalle);
+
+  file.close();
+}
+
+void registrarCiclo(const char* evento, const char* detalle) {
+  if (!sdDisponible) {
+    return;
+  }
+
+  char fecha[11];
+  char hora[9];
+
+  fechaHoraActual(
+    fecha,
+    sizeof(fecha),
+    hora,
+    sizeof(hora)
+  );
+
+  File file = SD_MMC.open(CICLOS_PATH, FILE_APPEND);
+
+  if (!file) {
+    Serial.println("Error al abrir archivo ciclos");
+    return;
+  }
+
+  file.print(fecha);
+  file.print(",");
+  file.print(hora);
+  file.print(",");
+  file.print(evento);
+  file.print(",");
+  file.print(nombreEstado(estadoActual));
+  file.print(",");
+  file.print(cicloLimpieza);
+  file.print(",");
+  file.println(detalle);
+
+  file.close();
+}
+
+void registrarAlerta(const char* descripcion, const char* detalle) {
+  if (!sdDisponible) {
+    return;
+  }
+
+  char fecha[11];
+  char hora[9];
+
+  fechaHoraActual(
+    fecha,
+    sizeof(fecha),
+    hora,
+    sizeof(hora)
+  );
+
+  File file = SD_MMC.open(ALERTAS_PATH, FILE_APPEND);
+  if (!file) {
+    Serial.println("Error al abrir archivo alertas");
+    return;
+  }
+
+  file.print(fecha);
+  file.print(",");
+  file.print(hora);
+  file.print(",");
+  file.print(descripcion);
+  file.print(",");
+  file.println(detalle);
+
+  file.close();
+}
+
+String urlEncode(const char* texto) {
+
+  String encoded = "";
+
+  while (*texto) {
+
+    char c = *texto++;
+
+    if ((c >= 'A' && c <= 'Z') ||
+        (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') ||
+        c == '-' ||
+        c == '_' ||
+        c == '.' ||
+        c == '~') {
+
+      encoded += c;
+
+    } else if (c == ' ') {
+
+      encoded += '+';
+
+    } else {
+
+      char hex[4];
+
+      snprintf(
+        hex,
+        sizeof(hex),
+        "%%%02X",
+        (uint8_t)c
+      );
+
+      encoded += hex;
+    }
+  }
+
+  return encoded;
+}
+
+void enviarCicloBD(const char* evento, const char* detalle) {
+  const char* tipoModo = "";
+  if (strcmp(evento, "INICIO_LIMPIEZA_BOTON") == 0) {
+    tipoModo = "manual";
+  } else if (strcmp(evento, "INICIO_LIMPIEZA_AUTO") == 0) {
+    tipoModo = "automatico";
+  } else {
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+
+    Serial.println("Reconectando WiFi para ciclo");
+    conectarWiFi();
+
+    if (WiFi.status() != WL_CONNECTED) {
+      registrarCiclo(evento, "Respaldo SD: WiFi desconectado");
+      return;
+    }
+  }
+
+  char fecha[11];
+  char hora[9];
+
+  fechaHoraActual(
+    fecha,
+    sizeof(fecha),
+    hora,
+    sizeof(hora)
+  );
+
+  HTTPClient http;
+
+  http.begin(serverName);
+
+  http.setTimeout(3000);
+
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+  String payload =
+    String("tipo=inicio_limpieza") +
+    "&fecha_hora=" + String(fecha) + "+" + String(hora) +
+    "&tipo_modo=" + String(tipoModo) +
+    "&ciclo=" + String(cicloLimpieza) +
+    "&detalle=" + urlEncode(detalle);
+
+  int httpCode = http.POST(payload);
+
+  Serial.print("HTTP ciclo: ");
+
+  Serial.println(httpCode);
+
+  http.end();
+
+  if (httpCode < 200 || httpCode >= 300) {
+
+    registrarCiclo(evento, "Respaldo SD: fallo HTTP");
+  }
+}
+
+void enviarAlertaBD(const char* descripcion) {
+
+  if (WiFi.status() != WL_CONNECTED) {
+
+    Serial.println("Reconectando WiFi para alerta");
+
+    conectarWiFi();
+
+    if (WiFi.status() != WL_CONNECTED) {
+
+      Serial.println("Alerta no enviada: WiFi desconectado");
+
+      registrarAlerta(descripcion, "Respaldo SD: WiFi desconectado");
+
+      return;
+    }
+  }
+
+  char fecha[11];
+  char hora[9];
+
+  fechaHoraActual(
+    fecha,
+    sizeof(fecha),
+    hora,
+    sizeof(hora)
+  );
+
+  HTTPClient http;
+
+  http.begin(serverName);
+
+  http.setTimeout(3000);
+
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+  String payload =
+    String("tipo=alerta") +
+    "&fecha_hora=" + String(fecha) + "+" + String(hora) +
+    "&descripcion=" + urlEncode(descripcion);
+
+  int httpCode = http.POST(payload);
+
+  Serial.print("HTTP alerta: ");
+
+  Serial.println(httpCode);
+
+  http.end();
+
+  if (httpCode < 200 || httpCode >= 300) {
+    registrarAlerta(descripcion, "Respaldo SD: fallo HTTP");
+  }
+}
+
+void crearArchivoSiNoExiste(const char* path, const char* cabecera) {
+
+  if (!SD_MMC.exists(path)) {
+
+    File file = SD_MMC.open(path, FILE_WRITE);
+
+    if (file) {
+
+      file.println(cabecera);
+
+      file.close();
+
+    } else {
+
+      Serial.println("Error al crear archivo SD");
     }
   }
 }
 
-// -------------------------
-// Botón (flanco)
-// -------------------------
+void iniciarSD() {
+
+  // Modo 1 bit para usar menos pines del ESP32.
+  if (!SD_MMC.begin("/sdcard", true)) {
+
+    Serial.println("Error al montar SD_MMC");
+
+    sdDisponible = false;
+
+    return;
+  }
+
+  sdDisponible = true;
+
+  Serial.println("SD_MMC montada");
+
+  crearArchivoSiNoExiste(TEMP_PATH, "Fecha,Hora,Temperatura_C,Detalle");
+
+  crearArchivoSiNoExiste(CICLOS_PATH, "Fecha,Hora,Evento,Estado,Ciclo,Detalle");
+
+  crearArchivoSiNoExiste(ALERTAS_PATH,"Fecha,Hora,Descripcion,Detalle");
+}
+
+// =====================================================
+// TIEMPO RTC
+// =====================================================
+
+uint32_t segundosTranscurridos() {
+
+  RtcDateTime ahora = rtc.GetDateTime();
+
+  return ahora.TotalSeconds() -
+         inicioEstado.TotalSeconds();
+}
+
+// =====================================================
+// BOTON
+// =====================================================
+
 void gestionarBoton() {
+
   static bool last = HIGH;
+
   bool now = digitalRead(BUTTON_PIN);
 
-  if (last == HIGH && now == LOW) {
+  if (last == HIGH && now == LOW && estadoActual == ESPERA) {
+
     if (millis() - tUltimoBoton > DEBOUNCE_MS) {
+
       tUltimoBoton = millis();
 
-      Serial.println("=== REINICIO MANUAL ===");
+      Serial.println("INICIO LIMPIEZA POR BOTON");
+
+      cicloLimpieza++;
 
       estadoActual = LIMPIANDO;
-      tInicioEstado = millis();
+
+      inicioEstado = rtc.GetDateTime();
+
+      enviarCicloBD("INICIO_LIMPIEZA_BOTON", "Boton presionado en espera");
     }
   }
+
   last = now;
 }
 
-// -------------------------
-// Ciclo principal
-// -------------------------
+// =====================================================
+// CICLO PRINCIPAL
+// =====================================================
+
 void gestionarCiclo() {
-  unsigned long now = millis();
+
+  uint32_t elapsed = segundosTranscurridos();
 
   switch (estadoActual) {
 
     case ESPERA:
-      setRGB(1, 0, 0); // 🔴 Rojo
+
+      setRGB(1,0,0);
+
       setRelay(false);
 
-      if (now - tInicioEstado >= TIEMPO_ESPERA_MS) {
-        Serial.println("→ LIMPIANDO");
+      if (elapsed >= TIEMPO_ESPERA_S) {
+
         estadoActual = LIMPIANDO;
-        tInicioEstado = now;
+
+        inicioEstado = rtc.GetDateTime();
+
+        cicloLimpieza++;
+
+        Serial.println("LIMPIANDO");
+
+        enviarCicloBD("INICIO_LIMPIEZA_AUTO", "Tiempo de espera cumplido");
       }
+
       break;
 
     case LIMPIANDO:
-      setRGB(0, 0, 1); // 🔵 Azul
+
+      setRGB(0,0,1);
+
       setRelay(true);
 
-      if (now - tInicioEstado >= TIEMPO_LIMPIEZA_MS) {
-        Serial.println("→ FINALIZADO");
+      if (elapsed >= TIEMPO_LIMPIEZA_S) {
+
         estadoActual = FINALIZADO;
-        tInicioEstado = now;
+
+        inicioEstado = rtc.GetDateTime();
+
+        Serial.println("FINALIZADO");
+
+        enviarCicloBD("FIN_LIMPIEZA", "Tiempo de limpieza cumplido");
       }
+
       break;
 
     case FINALIZADO:
-      setRGB(0, 1, 0); // 🟢 Verde
+
+      setRGB(0,1,0);
+
       setRelay(false);
 
-      if (now - tInicioEstado >= TIEMPO_FINAL_MS) {
-        Serial.println("→ ESPERA");
+      if (elapsed >= TIEMPO_FINAL_S) {
+
         estadoActual = ESPERA;
-        tInicioEstado = now;
-      }
-      break;
 
-    case FALLO:
-      setRGB(1, 0, 1); // 🟣 Morado
-      setRelay(false);
+        inicioEstado = rtc.GetDateTime();
+
+        Serial.println("ESPERA");
+
+        enviarCicloBD("ESPERA", "Ciclo finalizado");
+      }
+
       break;
   }
 }
 
-// -------------------------
-// Setup / Loop
-// -------------------------
+// =====================================================
+// WIFI
+// =====================================================
+
+void conectarWiFi() {
+
+  Serial.println(
+    "Conectando WiFi"
+  );
+
+  WiFi.disconnect(true);
+
+  delay(1000);
+
+  WiFi.mode(WIFI_STA);
+
+  WiFi.begin(ssid, password);
+
+  WiFi.setSleep(false);
+
+  unsigned long inicio = millis();
+
+  while (
+    WiFi.status() != WL_CONNECTED && millis() - inicio < 15000) {
+
+    delay(500);
+
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+
+    Serial.println("\nWiFi conectado");
+
+    Serial.print("IP: ");
+
+    Serial.println(WiFi.localIP());
+
+  } else {
+
+    Serial.println("\nERROR WIFI");
+  }
+}
+
+// =====================================================
+// TEMPERATURA + HTTP
+// =====================================================
+
+void gestionarWiFiPost() {
+
+  // Esperar tiempo entre POST
+
+  if (!esperandoConversion && millis() - tUltimoPost < TIEMPO_POST_MS) {
+    return;
+  }
+
+  // Iniciar conversion DS18B20
+
+  if (!esperandoConversion) {
+
+    sensors.requestTemperatures();
+
+    esperandoConversion = true;
+
+    tSolicitudTemp = millis();
+
+    return;
+  }
+
+  // Esperar conversion completa
+
+  if (millis() - tSolicitudTemp < 750) {
+    return;
+  }
+
+  esperandoConversion = false;
+
+  tUltimoPost = millis();
+
+  float temperatura = sensors.getTempCByIndex(0);
+
+  // Sensor desconectado
+
+  if (temperatura == DEVICE_DISCONNECTED_C) {
+
+    Serial.println("Error DS18B20");
+
+    enviarAlertaBD("Falla sensor temperatura DS18B20 desconectado");
+
+    return;
+  }
+
+  // Filtrado basico
+
+  if (temperatura < -20.0f || temperatura > 120.0f) {
+
+    Serial.println("Temperatura invalida");
+
+    enviarAlertaBD("Falla sensor temperatura lectura invalida");
+
+    return;
+  }
+
+  Serial.print("Temp: ");
+
+  Serial.println(temperatura);
+
+  // Verificar WiFi
+
+  if (WiFi.status() != WL_CONNECTED) {
+
+    Serial.println("Reconectando WiFi");
+
+    conectarWiFi();
+
+    if (WiFi.status() != WL_CONNECTED) {
+
+      registrarTemperatura(temperatura, "Respaldo SD: WiFi desconectado");
+
+      return;
+    }
+  }
+
+  HTTPClient http;
+
+  http.begin(serverName);
+
+  http.setTimeout(3000);
+
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+  char payload[128];
+  char fecha[11];
+  char hora[9];
+
+  fechaHoraActual(
+    fecha,
+    sizeof(fecha),
+    hora,
+    sizeof(hora)
+  );
+
+  snprintf(
+    payload,
+    sizeof(payload),
+    "temperatura=%.2f&fecha_hora=%s+%s",
+    temperatura,
+    fecha,
+    hora
+  );
+
+  int httpCode = http.POST(payload);
+
+  Serial.print("HTTP: ");
+
+  Serial.println(httpCode);
+
+  http.end();
+
+  if (httpCode < 200 || httpCode >= 300) {
+
+    registrarTemperatura(temperatura, "Respaldo SD: fallo HTTP");
+  }
+}
+
+// =====================================================
+// SINCRONIZACION SD
+// =====================================================
+
+void iniciarSincronizacion() {
+  if (!sdDisponible || WiFi.status() != WL_CONNECTED) return;
+  if (estadoSync != SYNC_NINGUNO) return;
+
+  File f = SD_MMC.open(TEMP_PATH, FILE_READ);
+  if (f) {
+    if (f.size() > 50) {
+      f.close();
+      if (SD_MMC.exists(TEMP_SYNC_PATH)) SD_MMC.remove(TEMP_SYNC_PATH);
+      SD_MMC.rename(TEMP_PATH, TEMP_SYNC_PATH);
+      crearArchivoSiNoExiste(TEMP_PATH, "Fecha,Hora,Temperatura_C,Detalle");
+    } else {
+      f.close();
+    }
+  }
+
+  f = SD_MMC.open(CICLOS_PATH, FILE_READ);
+  if (f) {
+    if (f.size() > 50) {
+      f.close();
+      if (SD_MMC.exists(CICLOS_SYNC_PATH)) SD_MMC.remove(CICLOS_SYNC_PATH);
+      SD_MMC.rename(CICLOS_PATH, CICLOS_SYNC_PATH);
+      crearArchivoSiNoExiste(CICLOS_PATH, "Fecha,Hora,Evento,Estado,Ciclo,Detalle");
+    } else {
+      f.close();
+    }
+  }
+
+  f = SD_MMC.open(ALERTAS_PATH, FILE_READ);
+  if (f) {
+    if (f.size() > 50) {
+      f.close();
+      if (SD_MMC.exists(ALERTAS_SYNC_PATH)) SD_MMC.remove(ALERTAS_SYNC_PATH);
+      SD_MMC.rename(ALERTAS_PATH, ALERTAS_SYNC_PATH);
+      crearArchivoSiNoExiste(ALERTAS_PATH, "Fecha,Hora,Descripcion,Detalle");
+    } else {
+      f.close();
+    }
+  }
+
+  if (SD_MMC.exists(TEMP_SYNC_PATH)) {
+     estadoSync = SYNC_TEMPERATURA;
+     archivoSync = SD_MMC.open(TEMP_SYNC_PATH, FILE_READ);
+     if (archivoSync) archivoSync.readStringUntil('\n');
+  } else if (SD_MMC.exists(CICLOS_SYNC_PATH)) {
+     estadoSync = SYNC_CICLOS;
+     archivoSync = SD_MMC.open(CICLOS_SYNC_PATH, FILE_READ);
+     if (archivoSync) archivoSync.readStringUntil('\n');
+  } else if (SD_MMC.exists(ALERTAS_SYNC_PATH)) {
+     estadoSync = SYNC_ALERTAS;
+     archivoSync = SD_MMC.open(ALERTAS_SYNC_PATH, FILE_READ);
+     if (archivoSync) archivoSync.readStringUntil('\n');
+  }
+}
+
+void procesarSincronizacion() {
+  if (estadoSync == SYNC_NINGUNO) return;
+  if (millis() - tUltimoSync < INTERVALO_SYNC_MS) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  if (!archivoSync || !archivoSync.available()) {
+     if (archivoSync) archivoSync.close();
+     
+     if (estadoSync == SYNC_TEMPERATURA) {
+        SD_MMC.remove(TEMP_SYNC_PATH);
+        if (SD_MMC.exists(CICLOS_SYNC_PATH)) {
+            estadoSync = SYNC_CICLOS;
+            archivoSync = SD_MMC.open(CICLOS_SYNC_PATH, FILE_READ);
+            if (archivoSync) archivoSync.readStringUntil('\n');
+        } else if (SD_MMC.exists(ALERTAS_SYNC_PATH)) {
+            estadoSync = SYNC_ALERTAS;
+            archivoSync = SD_MMC.open(ALERTAS_SYNC_PATH, FILE_READ);
+            if (archivoSync) archivoSync.readStringUntil('\n');
+        } else {
+            estadoSync = SYNC_NINGUNO;
+        }
+     } else if (estadoSync == SYNC_CICLOS) {
+        SD_MMC.remove(CICLOS_SYNC_PATH);
+        if (SD_MMC.exists(ALERTAS_SYNC_PATH)) {
+            estadoSync = SYNC_ALERTAS;
+            archivoSync = SD_MMC.open(ALERTAS_SYNC_PATH, FILE_READ);
+            if (archivoSync) archivoSync.readStringUntil('\n');
+        } else {
+            estadoSync = SYNC_NINGUNO;
+        }
+     } else if (estadoSync == SYNC_ALERTAS) {
+        SD_MMC.remove(ALERTAS_SYNC_PATH);
+        estadoSync = SYNC_NINGUNO;
+     }
+     return;
+  }
+
+  String linea = archivoSync.readStringUntil('\n');
+  linea.trim();
+  if (linea.length() == 0) return;
+
+  int coma1 = linea.indexOf(',');
+  int coma2 = linea.indexOf(',', coma1 + 1);
+  if (coma1 <= 0 || coma2 <= 0) return;
+
+  String fecha = linea.substring(0, coma1);
+  String hora = linea.substring(coma1 + 1, coma2);
+  String payload = "";
+
+  if (estadoSync == SYNC_TEMPERATURA) {
+      int coma3 = linea.indexOf(',', coma2 + 1);
+      if (coma3 > 0) {
+          String temp = linea.substring(coma2 + 1, coma3);
+          payload = "temperatura=" + temp + "&fecha_hora=" + fecha + "+" + hora;
+      }
+  } else if (estadoSync == SYNC_CICLOS) {
+      int coma3 = linea.indexOf(',', coma2 + 1);
+      int coma4 = linea.indexOf(',', coma3 + 1);
+      int coma5 = linea.indexOf(',', coma4 + 1);
+      if (coma3 > 0 && coma4 > 0 && coma5 > 0) {
+          String evento = linea.substring(coma2 + 1, coma3);
+          String ciclo = linea.substring(coma4 + 1, coma5);
+          String detalle = linea.substring(coma5 + 1);
+          
+          if (evento == "INICIO_LIMPIEZA_BOTON" || evento == "INICIO_LIMPIEZA_AUTO") {
+              String tipoModo = (evento == "INICIO_LIMPIEZA_BOTON") ? "manual" : "automatico";
+              payload = "tipo=inicio_limpieza&fecha_hora=" + fecha + "+" + hora + "&tipo_modo=" + tipoModo + "&ciclo=" + ciclo + "&detalle=" + urlEncode(detalle.c_str());
+          } else {
+              return;
+          }
+      }
+  } else if (estadoSync == SYNC_ALERTAS) {
+      int coma3 = linea.indexOf(',', coma2 + 1);
+      if (coma3 > 0) {
+          String desc = linea.substring(coma2 + 1, coma3);
+          payload = "tipo=alerta&fecha_hora=" + fecha + "+" + hora + "&descripcion=" + urlEncode(desc.c_str());
+      }
+  }
+
+  if (payload.length() > 0) {
+      HTTPClient http;
+      http.begin(serverName);
+      http.setTimeout(3000);
+      http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+      int httpCode = http.POST(payload);
+      Serial.print("Sync HTTP: "); Serial.println(httpCode);
+      http.end();
+  }
+  
+  tUltimoSync = millis();
+}
+
+// =====================================================
+// SETUP
+// =====================================================
+
 void setup() {
+
   Serial.begin(115200);
 
+  // =========================
+  // RTC DS1302
+  // =========================
+
+  rtc.Begin();
+
+  if (rtc.GetIsWriteProtected()) {
+
+    rtc.SetIsWriteProtected(false);
+  }
+
+  if (!rtc.GetIsRunning()) {
+
+    rtc.SetIsRunning(true);
+  }
+
+  // Ajustar solo la primera vez si el RTC no tiene hora valida.
+  // Despues de cargar y verificar, volver a comentar esta linea.
+  //
+  // rtc.SetDateTime(RtcDateTime(__DATE__, __TIME__));
+
+  if (!rtc.IsDateTimeValid()) {
+
+    Serial.println("RTC DS1302 sin fecha valida");
+  }
+
+  // =========================
+  // PINES
+  // =========================
+
   pinMode(RELAY1_PIN, OUTPUT);
+
   pinMode(RELAY2_PIN, OUTPUT);
+
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   pinMode(LED_R_PIN, OUTPUT);
+
   pinMode(LED_G_PIN, OUTPUT);
+
   pinMode(LED_B_PIN, OUTPUT);
 
+  // =========================
+  // ESTADOS INICIALES
+  // =========================
+
+  setRelay(false);
+
+  setRGB(0,0,0);
+
+  // =========================
+  // DS18B20
+  // =========================
+
   sensors.begin();
-  initCurrentSensor();
+
+  sensors.setResolution(12);
+
+  // Evita bloqueo de 750 ms
+
+  sensors.setWaitForConversion(false);
+
+  // =========================
+  // SD
+  // =========================
+
+  iniciarSD();
+
+  // =========================
+  // WIFI
+  // =========================
+
+  conectarWiFi();
+
+  // =========================
+  // ESTADO INICIAL
+  // =========================
 
   estadoActual = ESPERA;
-  tInicioEstado = millis();
+
+  inicioEstado = rtc.GetDateTime();
+
+  Serial.println("SISTEMA INICIADO");
+
+  enviarCicloBD("SISTEMA_INICIADO", "Inicio del ESP32");
 }
 
+// =====================================================
+// LOOP
+// =====================================================
+
 void loop() {
+
   gestionarBoton();
-  gestionarCorriente();
+
   gestionarCiclo();
 
-  delay(20);
+  gestionarWiFiPost();
+
+  iniciarSincronizacion();
+
+  procesarSincronizacion();
+
+  delay(1);
 }
