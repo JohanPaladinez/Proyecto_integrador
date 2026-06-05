@@ -1,3 +1,42 @@
+/********************************************************************
+ * PROYECTO:
+ * Sistema de Limpieza por Ultrasonido para Reactor Batch
+ *
+ * AUTORES:
+ * [Nombres de los integrantes]
+ *
+ * DESCRIPCIÓN:
+ * Sistema automatizado basado en ESP32 para la ejecución de ciclos
+ * de limpieza mediante ultrasonido dentro de un reactor batch.
+ *
+ * FUNCIONES PRINCIPALES:
+ * - Activación automática y manual de ciclos de limpieza.
+ * - Monitoreo de temperatura mediante sensor DS18B20.
+ * - Registro local de datos en memoria SD.
+ * - Sincronización automática con base de datos MySQL.
+ * - Acceso remoto a través de interfaz web.
+ * - Generación y almacenamiento de alertas.
+ *
+ * HARDWARE UTILIZADO:
+ * - ESP32
+ * - RTC DS1302
+ * - Sensor DS18B20
+ * - Módulo SD_MMC
+ * - Módulos de relé
+ * - LEDs RGB indicadores
+ * - Pulsador de activación manual
+ *
+ * SOFTWARE UTILIZADO:
+ * - Arduino IDE
+ * - MySQL
+ * - XAMPP (Apache)
+ * - Ngrok
+ *
+ * LABORATORIO:
+ * Ingeniería Ambiental
+ *
+ ********************************************************************/
+
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include "SD_MMC.h"
@@ -86,6 +125,26 @@ DallasTemperature sensors(&oneWire);
 // =====================================================
 // ESTADOS
 // =====================================================
+
+/********************************************************************
+ * MÁQUINA DE ESTADOS DEL SISTEMA
+ *
+ * ESPERA:
+ *   - Relés desactivados.
+ *   - LED rojo encendido.
+ *   - Espera el tiempo programado o una activación manual.
+ *
+ * LIMPIANDO:
+ *   - Relés activados.
+ *   - LED azul encendido.
+ *   - Transductor ultrasónico funcionando.
+ *
+ * FINALIZADO:
+ *   - Relés desactivados.
+ *   - LED verde encendido.
+ *   - Espera antes de reiniciar el ciclo.
+ *
+ ********************************************************************/
 
 enum EstadoSistema {
 
@@ -557,6 +616,16 @@ void gestionarBoton() {
 // CICLO PRINCIPAL
 // =====================================================
 
+/**
+ * @brief Gestiona la lógica principal de operación.
+ *
+ * Controla las transiciones entre los estados:
+ * ESPERA -> LIMPIANDO -> FINALIZADO
+ *
+ * También ejecuta la activación y desactivación
+ * del sistema ultrasónico mediante los relés.
+ */
+
 void gestionarCiclo() {
 
   uint32_t elapsed = segundosTranscurridos();
@@ -671,6 +740,16 @@ void conectarWiFi() {
 // =====================================================
 // TEMPERATURA + HTTP
 // =====================================================
+
+/**
+ * @brief Lee la temperatura y la envía al servidor.
+ *
+ * Obtiene la medición del sensor DS18B20,
+ * valida la lectura y la transmite mediante HTTP.
+ *
+ * Si existe un fallo de comunicación,
+ * la información se almacena localmente en la SD.
+ */
 
 void gestionarWiFiPost() {
 
@@ -793,6 +872,14 @@ void gestionarWiFiPost() {
 // SINCRONIZACION SD
 // =====================================================
 
+/**
+ * @brief Prepara los archivos pendientes para sincronización.
+ *
+ * Detecta registros almacenados localmente
+ * debido a fallos de comunicación y los
+ * prepara para su posterior envío al servidor.
+ */
+
 void iniciarSincronizacion() {
   if (!sdDisponible || WiFi.status() != WL_CONNECTED) return;
   if (estadoSync != SYNC_NINGUNO) return;
@@ -847,6 +934,14 @@ void iniciarSincronizacion() {
      if (archivoSync) archivoSync.readStringUntil('\n');
   }
 }
+
+/**
+ * @brief Envía al servidor los registros almacenados en SD.
+ *
+ * Se ejecuta cuando existe conexión WiFi.
+ * Garantiza la recuperación de información
+ * que no pudo enviarse previamente.
+ */
 
 void procesarSincronizacion() {
   if (estadoSync == SYNC_NINGUNO) return;
@@ -1019,6 +1114,13 @@ void setup() {
   // =========================
   // WIFI
   // =========================
+
+/**
+ * @brief Establece conexión con la red WiFi.
+ *
+ * Realiza la conexión en modo estación
+ * e informa el resultado mediante el monitor serial.
+ */
 
   conectarWiFi();
 
